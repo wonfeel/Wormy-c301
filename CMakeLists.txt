@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.18)
-project(TesseraWorm VERSION 1.0 LANGUAGES CXX C)
+project(WormyC301 VERSION 1.0 LANGUAGES CXX C)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -8,20 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ===== Движок - подтягивается по URL/тегу, не как ручной клон =====
 # GIT_TAG указывает на ветку по умолчанию; закрепите на конкретный тег/коммит,
-# как только в TesseraEngine появится первый релиз - плавающая ветка удобна на
+# как только в Tessera появится первый релиз - плавающая ветка удобна на
 # старте, но не для воспроизводимой сборки.
 include(FetchContent)
 FetchContent_Declare(
-    TesseraEngine
-    GIT_REPOSITORY https://github.com/wonfeel/TesseraEngine.git
+    Tessera
+    GIT_REPOSITORY https://github.com/wonfeel/Tessera.git
     GIT_TAG main
 )
-FetchContent_MakeAvailable(TesseraEngine)
+FetchContent_MakeAvailable(Tessera)
 
 # ===== Копирование ассетов =====
 add_custom_target(copy_assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${tesseraengine_SOURCE_DIR}/Shaders" "${CMAKE_BINARY_DIR}/Shaders"
+        "${tessera_SOURCE_DIR}/Shaders" "${CMAKE_BINARY_DIR}/Shaders"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/Shaders" "${CMAKE_BINARY_DIR}/Shaders"
     COMMENT "Copying engine + worm shaders"
@@ -44,7 +44,7 @@ function(fe_add_app MAIN_CPP TARGET_NAME)
     target_link_libraries(${TARGET_NAME} PRIVATE EngineLib)
     target_include_directories(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${tesseraengine_SOURCE_DIR}
+        ${tessera_SOURCE_DIR}
         ${TESSERA_ENGINE_GLFW_INCLUDE_DIR}
         ${TESSERA_ENGINE_GLAD_INCLUDE_DIR}
         ${TESSERA_ENGINE_GLM_INCLUDE_DIR}
