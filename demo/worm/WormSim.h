@@ -1546,11 +1546,15 @@ public:
         // константой (побитово прежнее поведение).
         //
         // Это единственная в модели память, переживающая опыт: всё остальное
-        // состояние релаксирует к нулю и опыт не хранит. У настоящего червя
-        // перезапись T_c занимает часы (Hedgecock & Russell 1975; Kimura et al.
-        // 2004), здесь масштаб взят от длины прогона - см. честную оговорку у
-        // реализации в applyTemperatureDrive.
-        std::atomic<float> thermalImprintTau{300.0f};
+        // состояние релаксирует к нулю и опыт не хранит.
+        //
+        // Значение БИОЛОГИЧЕСКОЕ, не подогнанное под длину прогона. У Mohri et
+        // al. 2005 (Genetics 169:1437) после переноса на другую температуру
+        // память о прежней T_c теряется за ~4 часа. Экспонента приходит к цели
+        // на 95% за 3*tau, отсюда tau = 4ч/3 = 4800с. Первоисточник самого
+        // явления - Hedgecock & Russell 1975; механизм (AFD/AIY) - Kimura et
+        // al. 2004, Clark et al. 2006.
+        std::atomic<float> thermalImprintTau{4800.0f};
         // ОТКАЛИБРОВАНО (tests/worm_thermotaxis_calibration, distribution
         // mode, 40 независимых seed-баз x 8 сидов = 320 честных парных
         // измерений): population mean effect = 0.2646 +/- 0.0724 (~3.65
@@ -1865,6 +1869,16 @@ private:
     connectome::NeuronId m_aseL = kInvalidId, m_aseR = kInvalidId; // производная по времени (клинокинез)
     connectome::NeuronId m_dva = kInvalidId; // stretch-рецептор, ощущаемая механическая нагрузка (см. applyMechanosensation)
     connectome::NeuronId m_afdL = kInvalidId, m_afdR = kInvalidId; // термосенсор (см. applyTemperatureDrive)
+    // Накопитель термальной памяти в double, отдельно от публикуемого
+    // params.cultivationTemp (float). Нужен именно из-за биологической
+    // постоянной времени: при tau=4800с шаг за такт равен (цель-T_c)*1.04e-5,
+    // и уже в 0.18 градуса от цели он становится меньше точности float32 -
+    // прибавление теряется целиком и память замирает, не дойдя. В double
+    // запаса хватает с большим избытком. m_cultTempPublished хранит последнее
+    // опубликованное значение, чтобы заметить запись T_c извне (ползунок в
+    // UI, стенд) и пересинхронизировать накопитель, а не затереть её.
+    double m_cultTempAccum = 0.0;
+    float m_cultTempPublished = 0.0f;
     float m_prevTemp = 0.0f; // для d(T)/dt
     connectome::NeuronId m_adfL = kInvalidId, m_adfR = kInvalidId; // серотонинергические (см. applySerotoninDrive)
     connectome::NeuronId m_nsmL = kInvalidId, m_nsmR = kInvalidId; // серотонинергические (см. applySerotoninDrive)

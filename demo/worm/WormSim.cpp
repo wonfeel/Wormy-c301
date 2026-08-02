@@ -827,19 +827,26 @@ float WormSim::applyTemperatureDrive() {
     // постоянной времени. thermalImprintTau<=0 (выключено) оставляет
     // cultivationTemp неизменным - побитово прежнее поведение.
     //
-    // Величина постоянной времени: у настоящего червя перезапись занимает
-    // часы, здесь же характерный прогон - сотни секунд, поэтому масштаб взят
-    // от прогона, а не от животного. Это ЯВНОЕ несоответствие масштабов, а не
-    // калибровка: сделать его биологическим значило бы, что в любом прогоне
-    // этой модели память не успевает измениться вообще и механизм невозможно
-    // ни увидеть, ни проверить.
+    // Величина постоянной времени взята у животного: ~4 часа на потерю прежней
+    // T_c (Mohri et al. 2005), то есть tau = 4800с - см. вывод у объявления
+    // параметра. Это заметно длиннее характерного прогона в сотни секунд, и
+    // так и должно быть: память, которая успевает перезаписаться за одну
+    // прогулку, памятью не является. Наблюдать её нужно на прогонах в часы -
+    // стенд `imprint` в tests/worm_v2_measurement именно для этого, а снятое
+    // ограничение скорости симуляции делает такой прогон дешёвым (час
+    // модельного времени - около семи секунд реального).
     {
         const float tau = params.thermalImprintTau.load();
         if (tau > 0.0f) {
             const float dtNow = std::max(1e-6f, params.dt.load());
-            const float alpha = 1.0f - std::exp(-dtNow / tau);
-            params.cultivationTemp = params.cultivationTemp.load()
-                                     + (temp - params.cultivationTemp.load()) * alpha;
+            const float current = params.cultivationTemp.load();
+            // Если T_c записали извне (ползунок, стенд) - принять это значение
+            // за новое состояние памяти, а не продолжать со своего накопителя.
+            if (current != m_cultTempPublished) m_cultTempAccum = static_cast<double>(current);
+            const double alpha = 1.0 - std::exp(-static_cast<double>(dtNow) / static_cast<double>(tau));
+            m_cultTempAccum += (static_cast<double>(temp) - m_cultTempAccum) * alpha;
+            m_cultTempPublished = static_cast<float>(m_cultTempAccum);
+            params.cultivationTemp = m_cultTempPublished;
         }
     }
 

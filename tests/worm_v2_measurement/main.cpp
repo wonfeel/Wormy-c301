@@ -795,9 +795,15 @@ int main(int argc, char** argv) {
     //
     // Стенд: линейный градиент температуры по арене, червь стартует в заданной
     // её доле. Печатается T_c и текущая температура по времени.
+    //
+    // Прогон по умолчанию - 6 часов модельного времени (432000 шагов при
+    // dt=0.05). Это не произвол: постоянная времени памяти биологическая
+    // (4800с), и на прогоне в сотни секунд она по построению почти не сдвинется.
+    // Шесть часов - это 4.5 tau, то есть память успевает дойти до цели.
+    // Стоит такой прогон около сорока секунд реального времени.
     if (argc >= 2 && std::string(argv[1]) == "imprint") {
         const unsigned seed = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 12345u;
-        const int steps = argc > 3 ? std::atoi(argv[3]) : 12000;
+        const int steps = argc > 3 ? std::atoi(argv[3]) : 432000;
         const float slope = argc > 4 ? static_cast<float>(std::atof(argv[4])) : 0.002f;
         const float startFrac = argc > 5 ? static_cast<float>(std::atof(argv[5])) : 0.25f;
         std::srand(seed);
@@ -807,21 +813,46 @@ int main(int argc, char** argv) {
         sim.params.tempGradientSlope = slope;
         sim.params.tempGradientAngle = 0.0f;
         if (argc > 6) sim.params.thermalImprintTau = static_cast<float>(std::atof(argv[6]));
+        // argv[7] - температура среды (tempBaseline). При slope=0 поле
+        // становится РОВНЫМ, и стенд превращается в опыт Mohri et al. 2005:
+        // животное, помнящее 20 градусов, переносят на другую постоянную
+        // температуру и смотрят, за какое время память перепишется. Это
+        // проверяет саму постоянную времени, а не только факт, что T_c ползёт:
+        // при градиенте червь бродит по всей арене и T_c сходится к её средней,
+        // что подтверждает движение, но не его темп.
+        if (argc > 7) sim.params.tempBaseline = static_cast<float>(std::atof(argv[7]));
         sim.setBounds(glm::vec2(0.0f), kFieldCols, kFieldRows, kHexSpacing);
         // Червь начинает в холодной или тёплой части арены - от этого и зависит,
         // какую температуру он "проживёт" и, значит, запомнит.
         sim.teleport(glm::vec2(kFieldCols * kHexSpacing * startFrac, kFieldRows * kHexSpacing * 0.5f));
         const float dt = sim.params.dt.load();
-        std::printf("imprint: seed=%u steps=%d slope=%.4f startFrac=%.2f tau=%.1f T_c(0)=%.3f\n", seed, steps,
-                    slope, startFrac, sim.params.thermalImprintTau.load(), sim.params.cultivationTemp.load());
+        const float tauUsed = sim.params.thermalImprintTau.load();
+        const float tcStart = sim.params.cultivationTemp.load();
+        std::printf("imprint: seed=%u steps=%d slope=%.4f startFrac=%.2f tau=%.1f base=%.2f T_c(0)=%.3f\n", seed,
+                    steps, slope, startFrac, tauUsed, sim.params.tempBaseline.load(), tcStart);
+        // На ровном поле цель известна заранее, поэтому печатаем и ожидаемую
+        // экспоненту - расхождение с ней сразу видно глазом, без отдельного
+        // разбора. При градиенте цель не определена, столбец опускается.
+        const bool flat = (slope == 0.0f);
+        const float target = sim.params.tempBaseline.load();
         WormSim::Snapshot snap;
         for (int i = 0; i < steps; ++i) {
             sim.step();
-            if (i % 1000 == 0 || i == steps - 1) {
+            // Печатать раз в ~30 минут модельного времени, а не раз в 50с:
+            // на шестичасовом прогоне прежний интервал дал бы 432 строки.
+            const int printEvery = std::max(1, steps / 12);
+            if (i % printEvery == 0 || i == steps - 1) {
                 sim.snapshot(snap);
-                std::printf("  t=%6.1fs  T_c=%.4f  T_here=%.4f  x=%.0f\n", i * dt,
+                const float t = i * dt;
+                std::printf("  t=%7.1fs  T_c=%.4f  T_here=%.4f  x=%.0f", t,
                             sim.params.cultivationTemp.load(), sim.temperatureAt(snap.pointsX[0], snap.pointsY[0]),
                             snap.pointsX[0]);
+                if (flat && tauUsed > 0.0f) {
+                    const float expected = target + (tcStart - target) * std::exp(-t / tauUsed);
+                    std::printf("   ожидается=%.4f  (%.0f%% пути)", expected,
+                                100.0f * (1.0f - std::exp(-t / tauUsed)));
+                }
+                std::printf("\n");
             }
         }
         return 0;
