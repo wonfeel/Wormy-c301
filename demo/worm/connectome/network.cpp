@@ -37,6 +37,11 @@ Network::Network(std::vector<NeuronType> types, std::vector<NeuronParams> params
     is_motor_neuron_.assign(n, 0);
     muscle_calcium_.assign(n, 0.0f);
     next_muscle_calcium_.assign(n, 0.0f);
+    sensory_threshold_.assign(n, 0.0);
+    sensory_raw_.assign(n, 0.0f);
+    sensory_prev_raw_.assign(n, 0.0f);
+    sensory_have_prev_.assign(n, 0);
+    sensory_drive_scratch_.assign(n, 0.0f);
 }
 
 void Network::set_input(NeuronId id, float value) { external_input_[id] = value; }
@@ -84,6 +89,35 @@ void Network::step(float dt) {
         const float act = activation_scratch_[id];
         const float alpha_r = std::clamp(dt / peptide_tau_release_, 0.0f, 1.0f);
         next_peptide_release_[id] = peptide_release_[id] + (act - peptide_release_[id]) * alpha_r;
+    }
+
+    // Сенсорная транcдукция с адаптирующимся порогом - только для явно
+    // заданных нейронов-сенсоров (sensory_ids_, обычно пара AFDL/AFDR), см.
+    // set_sensory_adaptation в network.hpp. Порядок внутри шага важен: знак
+    // берётся от порога ДО его обновления, то есть нейрон отвечает исходя из
+    // того, что он помнил, входя в этот шаг, а не из ещё не сложившейся
+    // памяти - тот же принцип пред-шагового состояния, что у active_w_ и
+    // peptide_release_ выше.
+    for (NeuronId id : sensory_ids_) {
+        const float raw = sensory_raw_[id];
+        const float prev = sensory_have_prev_[id] ? sensory_prev_raw_[id] : raw;
+        const float d_raw = raw - prev;
+        sensory_prev_raw_[id] = raw;
+        sensory_have_prev_[id] = 1;
+
+        const double threshold = sensory_threshold_[id];
+        // Инверсия знака - это свойство самого сенсора, а не прикладное
+        // решение: ниже запомненного порога потепление означает одно, выше -
+        // противоположное (Clark et al. 2006).
+        const float sign = (threshold >= static_cast<double>(raw)) ? 1.0f : -1.0f;
+        sensory_drive_scratch_[id] = sign * d_raw * sensory_gain_;
+
+        // Память: порог ползёт к пережитому стимулу. В double - см. развёрнутое
+        // обоснование у объявления sensory_threshold_.
+        if (sensory_tau_ > 0.0f) {
+            const double alpha = 1.0 - std::exp(-static_cast<double>(dt) / static_cast<double>(sensory_tau_));
+            sensory_threshold_[id] = threshold + (static_cast<double>(raw) - threshold) * alpha;
+        }
     }
 
     for (NeuronId i = 0; i < n; ++i) {
@@ -156,7 +190,10 @@ void Network::step(float dt) {
                 // список моторных ID и/или ненулевое отклонение от 1.0.
                 const float motorMult = (!is_output && is_motor_neuron_[i]) ? motor_leak_scale_ : 1.0f;
                 const float leak = is_output ? (p.leak * muscle_leak_scale_) : (p.leak * leak_scale_ * motorMult);
-                const float drive = is_output ? 0.0f : external_input_[i];  // мышцы по-прежнему без прямого сенсорного входа
+                // sensory_drive_scratch_ тождественно 0 для всех, кроме
+                // нейронов из sensory_ids_ (список пуст по умолчанию), так что
+                // без сенсорной адаптации это побитово прежний external_input_.
+                const float drive = is_output ? 0.0f : (external_input_[i] + sensory_drive_scratch_[i]);  // мышцы по-прежнему без прямого сенсорного входа
                 const float k = (leak + gap_gain_ * gap_row_sums_[i]) / p.capacitance;
                 const float f = (leak * p.rest + chem_current + gap_neighbor_current + drive + active_current_scratch_[i]
                                   + peptide_gain_ * peptide_current_scratch_[i]) / p.capacitance;

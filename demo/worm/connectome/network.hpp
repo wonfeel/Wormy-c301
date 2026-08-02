@@ -240,6 +240,54 @@ public:
         return muscle_calcium_tau_ > 1e-6f ? muscle_calcium_[id] : state_[id];
     }
 
+    // СЕНСОРНАЯ АДАПТАЦИЯ - память, живущая ВНУТРИ нейрона-сенсора.
+    //
+    // Биология (AFD, термосенсор): порог ответа - не константа, он ползёт к
+    // температуре, при которой животное содержалось (Kimura et al. 2004;
+    // Clark et al. 2006; Hedgecock & Russell 1975 - само явление). Ниже порога
+    // AFD отвечает на потепление одним знаком, выше - противоположным, и
+    // именно это делает термотаксис сходящимся К запомненной температуре с
+    // обеих сторон, а не "теплее всегда лучше". Перезапись занимает часы
+    // (Mohri et al. 2005) - см. WormSim::Params::thermalImprintTau за выводом
+    // конкретного значения.
+    //
+    // ЧЕМ ЭТО ОТЛИЧАЕТСЯ ОТ ПРЕЖНЕЙ РЕАЛИЗАЦИИ. Раньше и порог, и инверсия
+    // знака считались в WormSim, а сюда приходил уже готовый транcдуцированный
+    // сигнал. Поведение воспроизводилось, но память была переменной РЯДОМ с
+    // сетью, а не свойством нейрона: сеть о ней ничего не знала, и никакая
+    // другая часть модели не могла на неё влиять. Теперь нейрон получает сырой
+    // физический стимул (градусы) и сам решает, что с ним делать - память
+    // стала его состоянием, наравне с active_w_/peptide_release_/muscle_calcium_.
+    //
+    // Порог хранится в double НАМЕРЕННО, в отличие от всего остального
+    // состояния сети. При биологической tau=4800с и dt=0.05 шаг за такт равен
+    // (стимул-порог)*1.04e-5, и уже в 0.18 градуса от цели он становится
+    // меньше кванта float32 у значения ~25 - память замирает, не дойдя. Это
+    // было измерено, а не предположено (см. раздел 31.4.2 диагностики).
+    //
+    // Список целей пуст по умолчанию => sensory_drive_scratch_ тождественно
+    // нулевой, drive в интеграторе равен external_input_ побитово как раньше.
+    void set_sensory_adaptation_targets(std::vector<NeuronId> ids) { sensory_ids_ = std::move(ids); }
+    // tau<=0 - порог заморожен (память выключена, но транcдукция работает),
+    // ровно та же семантика, что у thermalImprintTau=0 до переноса.
+    void set_sensory_adaptation(float tau, float gain) {
+        sensory_tau_ = tau;
+        sensory_gain_ = gain;
+    }
+    // Сырой физический стимул - ОТДЕЛЬНЫЙ канал от set_input намеренно.
+    // set_input на тот же нейрон остаётся за вызывающим кодом для шума и
+    // прочих добавок, которые не должны попадать под производную и инверсию
+    // знака: шум внутри производной усилился бы, а не остался шумом.
+    void set_sensory_stimulus(NeuronId id, float raw) { sensory_raw_[id] = raw; }
+    double sensory_threshold(NeuronId id) const { return sensory_threshold_[id]; }
+    // Внешняя установка порога - начальное значение при загрузке и запись из
+    // UI/стенда. Сбрасывает и историю производной: подставлять новый порог,
+    // сохранив прежний prev_raw, значило бы выдать ложный скачок стимула.
+    void set_sensory_threshold(NeuronId id, double value) {
+        sensory_threshold_[id] = value;
+        sensory_have_prev_[id] = 0;
+    }
+
     // Утечка ОТДЕЛЬНО для мотонейронов (DA/DB/DD/VA/VB/VD - явный список
     // из WormSim, НЕ по NeuronType: ProcessingOutput включает и командные/
     // премоторные интернейроны вроде RIML/SIBVL, которых это не должно
@@ -316,6 +364,20 @@ private:
     // Утечка мотонейронов - см. set_motor_leak_targets/set_motor_leak_scale выше.
     std::vector<char> is_motor_neuron_;
     float motor_leak_scale_ = 1.0f;
+
+    // Сенсорная адаптация - см. set_sensory_adaptation(_targets) выше.
+    // sensory_have_prev_ отличает "производная ещё неизвестна" от "производная
+    // равна нулю": на первом шаге после загрузки или после записи порога
+    // извне честного prev_raw нет, и брать его за 0 значило бы выдать сети
+    // скачок стимула на всю величину температуры.
+    std::vector<NeuronId> sensory_ids_;
+    std::vector<double> sensory_threshold_;
+    std::vector<float> sensory_raw_;
+    std::vector<float> sensory_prev_raw_;
+    std::vector<char> sensory_have_prev_;
+    mutable std::vector<float> sensory_drive_scratch_;
+    float sensory_tau_ = 0.0f;
+    float sensory_gain_ = 1.0f;
 };
 
 } // namespace connectome

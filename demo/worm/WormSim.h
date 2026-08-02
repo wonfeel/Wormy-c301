@@ -1869,17 +1869,12 @@ private:
     connectome::NeuronId m_aseL = kInvalidId, m_aseR = kInvalidId; // производная по времени (клинокинез)
     connectome::NeuronId m_dva = kInvalidId; // stretch-рецептор, ощущаемая механическая нагрузка (см. applyMechanosensation)
     connectome::NeuronId m_afdL = kInvalidId, m_afdR = kInvalidId; // термосенсор (см. applyTemperatureDrive)
-    // Накопитель термальной памяти в double, отдельно от публикуемого
-    // params.cultivationTemp (float). Нужен именно из-за биологической
-    // постоянной времени: при tau=4800с шаг за такт равен (цель-T_c)*1.04e-5,
-    // и уже в 0.18 градуса от цели он становится меньше точности float32 -
-    // прибавление теряется целиком и память замирает, не дойдя. В double
-    // запаса хватает с большим избытком. m_cultTempPublished хранит последнее
-    // опубликованное значение, чтобы заметить запись T_c извне (ползунок в
-    // UI, стенд) и пересинхронизировать накопитель, а не затереть её.
-    double m_cultTempAccum = 0.0;
+    // Последнее ОПУБЛИКОВАННОЕ в params.cultivationTemp значение порога AFD.
+    // Сама память живёт внутри нейронов (Network::set_sensory_adaptation), сюда
+    // она только зеркалится для UI и стендов; сравнение с этим полем отличает
+    // запись извне (ползунок) от собственного дрейфа порога - см.
+    // applyTemperatureDrive.
     float m_cultTempPublished = 0.0f;
-    float m_prevTemp = 0.0f; // для d(T)/dt
     connectome::NeuronId m_adfL = kInvalidId, m_adfR = kInvalidId; // серотонинергические (см. applySerotoninDrive)
     connectome::NeuronId m_nsmL = kInvalidId, m_nsmR = kInvalidId; // серотонинергические (см. applySerotoninDrive)
     float m_pumpPhase = 0.0f; // фаза фарингеальной помпы в [0,1) - см. applySerotoninDrive

@@ -408,6 +408,19 @@ WormSim::WormSim(const std::string& connectomeDataPath)
         for (const MotorNeuron& mn : m_motorNeurons) motorIds.push_back(mn.id);
         net.set_motor_leak_targets(std::move(motorIds));  // см. Params::motorLeakScale - множитель, а не гейн, дефолт 1.0
     }
+    // AFD - нейроны с собственной памятью (адаптирующийся порог, см.
+    // Network::set_sensory_adaptation и applyTemperatureDrive). Начальный порог
+    // - стартовая cultivationTemp: животное приходит в модель, уже имея опыт
+    // содержания при какой-то температуре, а не с нулевым порогом.
+    {
+        std::vector<connectome::NeuronId> thermoIds;
+        if (m_afdL != kInvalidId) thermoIds.push_back(m_afdL);
+        if (m_afdR != kInvalidId) thermoIds.push_back(m_afdR);
+        const double startTemp = static_cast<double>(params.cultivationTemp.load());
+        for (connectome::NeuronId id : thermoIds) net.set_sensory_threshold(id, startTemp);
+        m_cultTempPublished = params.cultivationTemp.load();
+        net.set_sensory_adaptation_targets(std::move(thermoIds));
+    }
     if (m_generalChemoIds.empty() && m_aseL == kInvalidId && m_aseR == kInvalidId)
         throw std::runtime_error("connectome has no recognized chemosensory (AWA/AWC/ASE) neurons");
 
@@ -806,8 +819,6 @@ float WormSim::sampleTemperature(glm::vec2 worldPos) const {
 // и термотаксис не мог бы вообще сходиться к T_c с обеих сторон.
 float WormSim::applyTemperatureDrive() {
     const float temp = sampleTemperature(m_position);
-    const float tempDelta = temp - m_prevTemp;
-    m_prevTemp = temp;
 
     // ТЕРМАЛЬНЫЙ ИМПРИНТИНГ - единственная в этой модели НАСТОЯЩАЯ выученная
     // память, то есть состояние, которое переживает опыт, а не просто
@@ -823,9 +834,16 @@ float WormSim::applyTemperatureDrive() {
     // часы при переносе на другую температуру - то есть это медленный
     // след пережитого, а не константа.
     //
-    // Здесь ровно это: T_c ползёт к средней пережитой температуре с большой
-    // постоянной времени. thermalImprintTau<=0 (выключено) оставляет
-    // cultivationTemp неизменным - побитово прежнее поведение.
+    // ГДЕ ЭТА ПАМЯТЬ ЖИВЁТ. Внутри самих AFDL/AFDR, как их собственный
+    // адаптирующийся порог (Network::set_sensory_adaptation) - не в переменной
+    // рядом с сетью. Раньше и порог, и инверсия знака считались здесь, а в сеть
+    // уходил уже готовый сигнал; поведение то же, но памятью сеть не владела.
+    // Теперь WormSim отдаёт AFD сырую температуру в градусах, а всё остальное -
+    // дело нейрона. params.cultivationTemp ниже - ЗЕРКАЛО порога для UI и
+    // стендов, а не источник истины; запись в него извне переносится в нейрон.
+    //
+    // thermalImprintTau<=0 замораживает порог: транcдукция работает, память
+    // не меняется - побитово прежнее поведение с константной T_c.
     //
     // Величина постоянной времени взята у животного: ~4 часа на потерю прежней
     // T_c (Mohri et al. 2005), то есть tau = 4800с - см. вывод у объявления
@@ -835,29 +853,40 @@ float WormSim::applyTemperatureDrive() {
     // стенд `imprint` в tests/worm_v2_measurement именно для этого, а снятое
     // ограничение скорости симуляции делает такой прогон дешёвым (час
     // модельного времени - около семи секунд реального).
-    {
-        const float tau = params.thermalImprintTau.load();
-        if (tau > 0.0f) {
-            const float dtNow = std::max(1e-6f, params.dt.load());
-            const float current = params.cultivationTemp.load();
-            // Если T_c записали извне (ползунок, стенд) - принять это значение
-            // за новое состояние памяти, а не продолжать со своего накопителя.
-            if (current != m_cultTempPublished) m_cultTempAccum = static_cast<double>(current);
-            const double alpha = 1.0 - std::exp(-static_cast<double>(dtNow) / static_cast<double>(tau));
-            m_cultTempAccum += (static_cast<double>(temp) - m_cultTempAccum) * alpha;
-            m_cultTempPublished = static_cast<float>(m_cultTempAccum);
-            params.cultivationTemp = m_cultTempPublished;
-        }
+    connectome::Network& net = m_loaded.network;
+    net.set_sensory_adaptation(params.thermalImprintTau.load(), params.thermoGain.load());
+
+    // Запись T_c извне (ползунок в UI, стенд) - перенести в нейроны. Отличается
+    // от собственного дрейфа порога сравнением с последним опубликованным
+    // значением: сам дрейф идёт в нейроне и сюда только зеркалится.
+    const float requested = params.cultivationTemp.load();
+    if (requested != m_cultTempPublished) {
+        if (m_afdL != kInvalidId) net.set_sensory_threshold(m_afdL, static_cast<double>(requested));
+        if (m_afdR != kInvalidId) net.set_sensory_threshold(m_afdR, static_cast<double>(requested));
     }
 
-    const float sign = (params.cultivationTemp.load() >= temp) ? 1.0f : -1.0f;
-    const float gain = params.thermoGain.load();
+    // Сырой физический стимул - в градусах, без транcдукции. Шум идёт
+    // отдельным каналом (set_input), чтобы не попасть под производную: внутри
+    // неё он перестал бы быть шумом и стал бы усиленным дребезгом стимула.
     const float noiseAmp = params.spontaneousNoise.load();
-    const float signal = sign * tempDelta * gain;
+    if (m_afdL != kInvalidId) {
+        net.set_sensory_stimulus(m_afdL, temp);
+        net.set_input(m_afdL, signedNoise(noiseAmp));
+    }
+    if (m_afdR != kInvalidId) {
+        net.set_sensory_stimulus(m_afdR, temp);
+        net.set_input(m_afdR, signedNoise(noiseAmp));
+    }
 
-    connectome::Network& net = m_loaded.network;
-    if (m_afdL != kInvalidId) net.set_input(m_afdL, signal + signedNoise(noiseAmp));
-    if (m_afdR != kInvalidId) net.set_input(m_afdR, signal + signedNoise(noiseAmp));
+    // Зеркало для UI/стендов: среднее по двум сенсорам. Они адаптируются
+    // независимо (у каждого свой порог, как у настоящих AFDL/AFDR), но видят
+    // одну и ту же температуру головы, поэтому расходятся лишь численно.
+    if (m_afdL != kInvalidId) {
+        const double left = net.sensory_threshold(m_afdL);
+        const double right = (m_afdR != kInvalidId) ? net.sensory_threshold(m_afdR) : left;
+        m_cultTempPublished = static_cast<float>(0.5 * (left + right));
+        params.cultivationTemp = m_cultTempPublished;
+    }
 
     return temp;
 }
