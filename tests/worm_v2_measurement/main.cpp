@@ -165,6 +165,10 @@ struct V2Point {
     float muscleTargetTau = 0.0f;
     // Params::mediumBendInternalFraction (Fang-Yen et al. 2010) - 1.0 выключено.
     float mediumBendInternalFraction = 1.0f;
+    // Params::mediumRateCoupling - какая доля связи со средой переносится на
+    // ПРЕДЕЛ СКОРОСТИ сустава (отдельно от постоянной времени). argv[39].
+    // 1.0 = прежнее поведение.
+    float mediumRateCoupling = 1.0f;
     // Params::dragSettleGain - стенд по историческим причинам гонял 0, тогда как
     // отгружено 25. Вынесен явно, чтобы можно было мерить ОТГРУЖЕННУЮ физику.
     float dragSettleGainOverride = -1.0f;
@@ -202,6 +206,7 @@ void applyPoint(WormSim& sim, const V2Point& p) {
     sim.params.mediumAmplitudeViaDecay = p.mediumAmplitudeViaDecay;
     sim.params.muscleTargetTau = p.muscleTargetTau;
     sim.params.mediumBendInternalFraction = p.mediumBendInternalFraction;
+    sim.params.mediumRateCoupling = p.mediumRateCoupling;
 }
 
 void printPoint(const V2Point& p) {
@@ -1396,6 +1401,8 @@ int main(int argc, char** argv) {
         if (argc > 37) g_arenaScale = std::max(1, std::atoi(argv[37]));
         // argv[38]: mediumBendInternalFraction - см. V2Point.
         if (argc > 38) pt.mediumBendInternalFraction = static_cast<float>(std::atof(argv[38]));
+        // argv[39]: mediumRateCoupling - см. V2Point.
+        if (argc > 39) pt.mediumRateCoupling = static_cast<float>(std::atof(argv[39]));
         std::printf("point="); printPoint(pt);
         std::printf(" - %d bases x %d seeds, warmup=%d measure=%d, mechanoGain=%.3f localMechanoGain=%.3f baseSeed=%u\n",
                     numBases, seedsPerBase, warmupSteps, measureSteps, pt.mechanoGain, pt.localMechanoGain, baseRngSeed);
