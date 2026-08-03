@@ -427,6 +427,7 @@ WormSim::WormSim(const std::string& connectomeDataPath)
             }
         }
         m_commandIds = commandIds;
+        net.set_command_active_targets(commandIds);
         net.set_command_leak_targets(std::move(commandIds));
     }
     // AFD - нейроны с собственной памятью (адаптирующийся порог, см.
@@ -1209,6 +1210,7 @@ void WormSim::step() {
     net.set_motor_leak_scale(params.motorLeakScale.load() *
                               (1.0f + params.dopamineMotorLeakGain.load() * m_dopamineTone));
     net.set_command_leak_scale(params.commandLeakScale.load());
+    net.set_command_active_current(params.commandActiveGain.load(), params.commandActiveTau.load());
 
     const float dt = params.dt.load();
 

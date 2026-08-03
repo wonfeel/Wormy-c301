@@ -161,10 +161,38 @@ public:
     // gain=0 (дефолт) - ток тождественно равен нулю для КАЖДОГО нейрона на
     // КАЖДОМ шаге, вне зависимости от target-списка - см. WormSim.cpp за
     // статусом калибровки (не откалибровано, выключено).
-    void set_active_current_targets(std::vector<NeuronId> ids) { active_ids_ = std::move(ids); }
+    //
+    // ГРУППЫ. Ток разведён по группам, потому что двум разным подсистемам он
+    // нужен с постоянными времени, отличающимися на три порядка: мотонейронам
+    // B-класса - секунды (ритм волны), командному слою - десятки секунд
+    // (удержание решения "вперёд или назад", см. Params::commandLeakScale и
+    // раздел 37). Одной глобальной пары gain/tau на это не хватает.
+    //
+    // gain и tau хранятся ПОНЕЙРОННО, active_ids_ - объединение групп, по
+    // которому идёт цикл в step(). При gain=0 (дефолт обеих групп) ток
+    // тождественно нулевой, то есть поведение побитово прежнее.
+    void set_active_current_targets(std::vector<NeuronId> ids) {
+        active_group_b_ = std::move(ids);
+        rebuild_active_ids();
+    }
     void set_active_current(float gain, float tau_w) {
-        active_gain_ = gain;
-        active_tau_w_ = std::max(1e-3f, tau_w);
+        for (NeuronId id : active_group_b_) {
+            active_gain_v_[id] = gain;
+            active_tau_v_[id] = std::max(1e-3f, tau_w);
+        }
+    }
+    // Вторая группа - командный слой. Отдельный список и отдельная пара
+    // gain/tau, всё остальное общее (та же воротная переменная active_w_, тот
+    // же цикл в step()).
+    void set_command_active_targets(std::vector<NeuronId> ids) {
+        active_group_cmd_ = std::move(ids);
+        rebuild_active_ids();
+    }
+    void set_command_active_current(float gain, float tau_w) {
+        for (NeuronId id : active_group_cmd_) {
+            active_gain_v_[id] = gain;
+            active_tau_v_[id] = std::max(1e-3f, tau_w);
+        }
     }
 
     // Нейропептидная сигнализация (PDF-1/PDFR-1 - Ripoll-Sánchez, Watteyne et
@@ -353,12 +381,29 @@ private:
     float leak_scale_ = 1.0f;
 
     // Активный ток - см. set_active_current(_targets) выше.
-    std::vector<NeuronId> active_ids_;
+    std::vector<NeuronId> active_ids_;        // объединение групп, по нему идёт step()
+    std::vector<NeuronId> active_group_b_;    // мотонейроны B-класса
+    std::vector<NeuronId> active_group_cmd_;  // командный слой
     mutable std::vector<float> active_current_scratch_;
     std::vector<float> active_w_;
     std::vector<float> next_active_w_;
-    float active_gain_ = 0.0f;
-    float active_tau_w_ = 1.0f;
+    std::vector<float> active_gain_v_;  // понейронно, 0 = ток выключен
+    std::vector<float> active_tau_v_;   // понейронно
+
+    // Пересобирает active_ids_ как объединение групп без дублей: нейрон,
+    // попавший в обе, должен обновляться один раз за шаг.
+    void rebuild_active_ids() {
+        active_ids_.clear();
+        std::vector<char> seen(active_gain_v_.size(), 0);
+        for (const std::vector<NeuronId>* g : {&active_group_b_, &active_group_cmd_}) {
+            for (NeuronId id : *g) {
+                if (static_cast<std::size_t>(id) < seen.size() && !seen[id]) {
+                    seen[id] = 1;
+                    active_ids_.push_back(id);
+                }
+            }
+        }
+    }
 
     // Нейропептид (PDF-1/PDFR-1) - см. set_peptide_connectivity выше.
     // Дефолтная (пустая) CsrMatrix имеет num_rows()==num_cols()==0, так что

@@ -821,6 +821,16 @@ int main(int argc, char** argv) {
             const float c = static_cast<float>(std::atof(argv[5]));
             if (c >= 0.0f) sim.params.commandLeakScale = c;
         }
+        // argv[6]: commandActiveGain, argv[7]: commandActiveTau - медленный
+        // активный ток командного слоя, см. Params::commandActiveGain.
+        if (argc > 6) {
+            const float g = static_cast<float>(std::atof(argv[6]));
+            if (g >= 0.0f) sim.params.commandActiveGain = g;
+        }
+        if (argc > 7) {
+            const float t = static_cast<float>(std::atof(argv[7]));
+            if (t > 0.0f) sim.params.commandActiveTau = t;
+        }
         sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
         const float dt = sim.params.dt.load();
         const std::vector<std::string>& names = sim.neuronNames();

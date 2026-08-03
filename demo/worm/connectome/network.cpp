@@ -31,6 +31,8 @@ Network::Network(std::vector<NeuronType> types, std::vector<NeuronParams> params
     active_current_scratch_.assign(n, 0.0f);
     active_w_.assign(n, 1.0f);   // канал полностью "открыт" в покое (см. set_active_current)
     next_active_w_.assign(n, 1.0f);
+    active_gain_v_.assign(n, 0.0f);  // ток выключен, пока группа не задана явно
+    active_tau_v_.assign(n, 1.0f);
     peptide_current_scratch_.assign(n, 0.0f);
     peptide_release_.assign(n, 0.0f);
     next_peptide_release_.assign(n, 0.0f);
@@ -77,9 +79,9 @@ void Network::step(float dt) {
     // состояния, не от того, что только предстоит вычислить в этом шаге.
     for (NeuronId id : active_ids_) {
         const float act = activation_scratch_[id];
-        active_current_scratch_[id] = active_gain_ * active_w_[id] * act;  // ==0 exactly when active_gain_==0
+        active_current_scratch_[id] = active_gain_v_[id] * active_w_[id] * act;  // ==0 exactly when gain==0
         const float w_inf = 1.0f - act;  // закрывается при деполяризации, открыт в покое
-        const float alpha_w = std::clamp(dt / active_tau_w_, 0.0f, 1.0f);
+        const float alpha_w = std::clamp(dt / active_tau_v_[id], 0.0f, 1.0f);
         next_active_w_[id] = active_w_[id] + (w_inf - active_w_[id]) * alpha_w;
     }
 
