@@ -791,6 +791,99 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // ./exe netact <seed> <steps> <dragNormal>
+    // АКТИВНОСТЬ СЕТИ ПОУЗЛОВО. Вопрос ровно один: сколько из 401 узла реально
+    // участвует в поведении, а сколько стоит мёртвым грузом. Меряется
+    // среднеквадратичное отклонение состояния узла за прогон - узел, чьё
+    // состояние не меняется, на поведение влиять не может, сколько бы связей у
+    // него ни было. Мышцы (имена MDL/MDR/MVL/MVR) считаются отдельно от
+    // нейронов: у них своя динамика и мешать их в одну статистику нельзя.
+    if (argc >= 2 && std::string(argv[1]) == "netact") {
+        const unsigned seed = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 12345u;
+        const int steps = argc > 3 ? std::atoi(argv[3]) : 6000;
+        const float dragNormal = argc > 4 ? static_cast<float>(std::atof(argv[4])) : kDragAgar;
+        g_arenaScale = 4;
+        std::srand(seed);
+        WormSim sim("worm_data/celegans_herm.connectome");
+        sim.params.dragTangent = 1.0f;
+        sim.params.dragNormal = dragNormal;
+        sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
+        const std::vector<std::string>& names = sim.neuronNames();
+        WormSim::Snapshot snap;
+        const int warmup = 600;
+        std::vector<double> sum, sumsq;
+        long samples = 0;
+        for (int i = 0; i < steps; ++i) {
+            sim.step();
+            if (i < warmup) continue;
+            sim.snapshot(snap);
+            if (sum.empty()) { sum.assign(snap.nodeStates.size(), 0.0); sumsq.assign(snap.nodeStates.size(), 0.0); }
+            for (std::size_t k = 0; k < snap.nodeStates.size(); ++k) {
+                const double v = snap.nodeStates[k];
+                sum[k] += v; sumsq[k] += v * v;
+            }
+            ++samples;
+        }
+        if (samples == 0 || sum.empty()) { std::printf("netact: нет выборок\n"); return 1; }
+        const auto isMuscle = [&](std::size_t k) {
+            if (k >= names.size() || names[k].size() < 3) return false;
+            const std::string& s = names[k];
+            return s[0] == 'M' && (s[1] == 'D' || s[1] == 'V') && (s[2] == 'L' || s[2] == 'R');
+        };
+        struct Row { double sd; std::size_t idx; };
+        std::vector<Row> neurons, muscles;
+        for (std::size_t k = 0; k < sum.size(); ++k) {
+            const double mean = sum[k] / samples;
+            const double var = std::max(0.0, sumsq[k] / samples - mean * mean);
+            (isMuscle(k) ? muscles : neurons).push_back({std::sqrt(var), k});
+        }
+        const auto report = [&](std::vector<Row>& v, const char* label) {
+            if (v.empty()) return;
+            std::sort(v.begin(), v.end(), [](const Row& a, const Row& b) { return a.sd > b.sd; });
+            const double top = v.front().sd;
+            std::printf("  %s: всего %zu\n", label, v.size());
+            const double cuts[] = {1e-6, 1e-4, 1e-3, 1e-2};
+            for (double c : cuts) {
+                std::size_t n = 0;
+                for (const Row& r : v) if (r.sd < c) ++n;
+                std::printf("    sd < %-8.0e : %4zu  (%5.1f%%)\n", c, n,
+                            100.0 * static_cast<double>(n) / static_cast<double>(v.size()));
+            }
+            // Доля от самого активного - показывает, узкий ли это круг.
+            std::size_t frac10 = 0;
+            for (const Row& r : v) if (r.sd >= 0.10 * top) ++frac10;
+            std::printf("    sd >= 10%% от максимума: %zu   максимум sd=%.5f\n", frac10, top);
+            std::printf("    самые активные:");
+            for (std::size_t i = 0; i < std::min<std::size_t>(8, v.size()); ++i) {
+                std::printf(" %s(%.4f)", names[v[i].idx].c_str(), v[i].sd);
+            }
+            std::printf("\n");
+        };
+        std::printf("netact: seed=%u steps=%d drag=%.2f  выборок=%ld  узлов=%zu\n",
+                    seed, steps, dragNormal, samples, sum.size());
+        report(neurons, "НЕЙРОНЫ");
+        report(muscles, "МЫШЦЫ");
+        // КОМАНДНЫЕ ИНТЕРНЕЙРОНЫ отдельно. У настоящего червя выбор
+        // вперёд/назад делают именно они (AVA назад, AVB вперёд); здесь этот
+        // выбор делает WormSim::updateLocomotionState броском frand(), поэтому
+        // важно знать, шевелятся ли они вообще - или загружены и забыты.
+        const char* watch[] = {"AVAL", "AVAR", "AVBL", "AVBR", "AVDL", "AVDR",
+                               "AVEL", "AVER", "PVCL", "PVCR", "AIYL", "AIBL", "RIML"};
+        std::printf("  КОМАНДНЫЕ/ИНТЕР (у червя решают ход, здесь - нет):\n   ");
+        for (const char* w : watch) {
+            for (std::size_t k = 0; k < names.size(); ++k) {
+                if (names[k] == w) {
+                    const double mean = sum[k] / samples;
+                    const double var = std::max(0.0, sumsq[k] / samples - mean * mean);
+                    std::printf(" %s(sd=%.4f)", w, std::sqrt(var));
+                    break;
+                }
+            }
+        }
+        std::printf("\n");
+        return 0;
+    }
+
     // ./exe yaw <seed> <steps> <dragNormal> <arenaScale>
     // РЫСКАНИЕ: откуда берётся поворот тела в фазе прямого хода. Раздел 33.5
     // назвал это последним узким местом, но не разделил две возможности:
