@@ -824,12 +824,30 @@ int main(int argc, char** argv) {
         }
         sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
         const float dt = sim.params.dt.load();
+        // Дальний край поля - та же формула, что в WormSim::setBounds. Нужен,
+        // чтобы ИСКЛЮЧИТЬ из статистики контакт со стеной: containBody у края
+        // разворачивает червя принудительно, и на арене 100x75 длин тела за
+        // 970 с он до края доезжает. Такой разворот - свойство стенда.
+        const glm::vec2 boundsMax = HexGrid::worldPos(kFieldCols * g_arenaScale - 1,
+                                                      kFieldRows * g_arenaScale - 1, kHexSpacing);
         WormSim::Snapshot snap;
         double netHeading = 0.0, absHeading = 0.0, bendSum = 0.0, bendSqSum = 0.0;
         long bendCount = 0;
         float prevHeading = 0.0f;
         bool havePrev = false;
         const int warmup = 600;
+        // След центроида для ПОСТОБРАБОТКИ. Мгновенный курс голова-хвост для
+        // рыскания не годится: ось качается сама по себе на каждом взмахе
+        // волны, и эта качка на порядок больше искомого сноса. Направление
+        // хода берётся по смещению центроида за окно НЕ МЕНЬШЕ периода - тогда
+        // качка усредняется в ноль, а снос остаётся.
+        struct Trk { float cx, cy; unsigned char fwd, clear; };
+        std::vector<Trk> trk;
+        trk.reserve(static_cast<std::size_t>(std::max(0, steps - warmup)));
+        std::vector<float> segRot;
+        segRot.reserve(static_cast<std::size_t>(std::max(0, steps - warmup)));
+        float prevSegHeading = 0.0f;
+        bool haveSegHeading = false;
         // Путь центроида и число полуволн изгиба - чтобы получить ГЛАВНУЮ
         // величину теории RFT: сколько длин тела проходится за один цикл.
         // Она не зависит ни от темпа сети, ни от предела сустава - только от
@@ -889,6 +907,42 @@ int main(int argc, char** argv) {
             }
             prevCx = cx; prevCy = cy; lastCx = cx; lastCy = cy;
 
+            // ПОВОРОТ ГОЛОВНОГО СЕГМЕНТА ЗА ШАГ - ровно та величина, по которой
+            // регрессия отбраковывает "неправдоподобный хлыст" (порог 0.5 рад
+            // за шаг = 10 рад/с). Собирается ВСЁ распределение, а не максимум:
+            // если при подъёме предела сустава оно просто целиком сдвигается
+            // вверх, то порог 0.5 - произвольная отсечка на здоровом животном;
+            // если отрастает хвост при неподвижной середине - это срыв счёта.
+            // Омега исключается: там предел сустава намеренно втрое выше.
+            {
+                const float hx0 = snap.pointsX[1] - snap.pointsX[0];
+                const float hy0 = snap.pointsY[1] - snap.pointsY[0];
+                const float segHeading = std::atan2(hy0, hx0);
+                if (haveSegHeading && sim.debugLocomotionPhase() != 2) {
+                    float hd = segHeading - prevSegHeading;
+                    while (hd > kPi) hd -= 2.0f * kPi;
+                    while (hd < -kPi) hd += 2.0f * kPi;
+                    segRot.push_back(std::fabs(hd));
+                }
+                prevSegHeading = segHeading;
+                haveSegHeading = true;
+            }
+
+            // Шаг годится для статистики рыскания, только если червь идёт
+            // ВПЕРЁД (в реверсе и омега-повороте курс меняется по замыслу) и
+            // всё тело дальше одной своей длины от любой стены.
+            float minX = snap.pointsX[0], maxX = snap.pointsX[0];
+            float minY = snap.pointsY[0], maxY = snap.pointsY[0];
+            for (std::size_t k = 1; k < np; ++k) {
+                minX = std::min(minX, snap.pointsX[k]); maxX = std::max(maxX, snap.pointsX[k]);
+                minY = std::min(minY, snap.pointsY[k]); maxY = std::max(maxY, snap.pointsY[k]);
+            }
+            const bool clear = minX > kBodyLength && minY > kBodyLength
+                               && maxX < boundsMax.x - kBodyLength && maxY < boundsMax.y - kBodyLength;
+            trk.push_back({static_cast<float>(cx), static_cast<float>(cy),
+                           static_cast<unsigned char>(sim.debugLocomotionPhase() == 0 ? 1 : 0),
+                           static_cast<unsigned char>(clear ? 1 : 0)});
+
             // Частота - по смене знака изгиба в СЕРЕДИНЕ тела (там волна уже
             // развита и не искажена ни головной мускулатурой, ни свободным
             // хвостом). Два пересечения нуля = один полный цикл.
@@ -925,6 +979,100 @@ int main(int argc, char** argv) {
                     cycles > 0 ? fwdLen / kBodyLength / cycles : 0.0,
                     cycles > 0 ? pathLen / kBodyLength / cycles : 0.0,
                     cycles > 0 ? netDisp / kBodyLength / cycles : 0.0);
+
+        if (!segRot.empty()) {
+            std::vector<float> s = segRot;
+            std::sort(s.begin(), s.end());
+            const auto q = [&](double p) {
+                const std::size_t idx = std::min(s.size() - 1,
+                    static_cast<std::size_t>(p * static_cast<double>(s.size() - 1)));
+                return s[idx];
+            };
+            long over = 0;
+            for (float v : s) if (v > 0.5f) ++over;
+            std::printf("  поворот головного сегмента за шаг, рад (без омеги, n=%zu):\n", s.size());
+            std::printf("    медиана=%.4f  90%%=%.4f  99%%=%.4f  99.9%%=%.4f  макс=%.4f  выше 0.5: %ld (%.3f%%)\n",
+                        q(0.50), q(0.90), q(0.99), q(0.999), s.back(), over,
+                        100.0 * static_cast<double>(over) / static_cast<double>(s.size()));
+        }
+
+        // ---- СНОС КУРСА НА ПРОБЕГЕ ----------------------------------------
+        // Всё выше меряет ось тела и потому насквозь загрязнено качкой. Ниже -
+        // направление РЕАЛЬНОГО ХОДА центроида, усреднённое по окну длиннее
+        // периода, и только на прямых пробегах вдали от стен. Это та же
+        // величина, которую меряют у животного: скорость искривления траектории
+        // на пробеге (Pierce-Shimomura et al. 1999 - у червя пробег между
+        // пируэтами практически прямой).
+        const int win = std::max(2, static_cast<int>(3.0f / dt));
+        const double winSec = win * static_cast<double>(dt);
+        long fwdSteps = 0, clearSteps = 0;
+        for (std::size_t i = 0; i < trk.size(); ++i) {
+            if (trk[i].fwd) ++fwdSteps;
+            if (trk[i].clear) ++clearSteps;
+        }
+        // Префиксная сумма "плохих" шагов - чтобы проверка "весь промежуток
+        // чист" была за постоянное время, а не за длину промежутка.
+        std::vector<int> badPrefix(trk.size() + 1, 0);
+        for (std::size_t i = 0; i < trk.size(); ++i) {
+            badPrefix[i + 1] = badPrefix[i] + ((trk[i].fwd && trk[i].clear) ? 0 : 1);
+        }
+        const auto spanClean = [&](std::size_t a, std::size_t b) {  // включительно
+            return badPrefix[b + 1] - badPrefix[a] == 0;
+        };
+        // Направление хода в каждый момент + признак его пригодности.
+        std::vector<double> dir(trk.size(), 0.0);
+        std::vector<unsigned char> dirOk(trk.size(), 0);
+        const double minMove = 0.05 * kBodyLength;
+        for (std::size_t i = static_cast<std::size_t>(win); i < trk.size(); ++i) {
+            if (!spanClean(i - static_cast<std::size_t>(win), i)) continue;
+            const std::size_t a = i - static_cast<std::size_t>(win);
+            const double dx = trk[i].cx - trk[a].cx, dy = trk[i].cy - trk[a].cy;
+            // Если за окно червь почти не сместился, направление хода не
+            // определено - такой момент выбрасывается, а не считается нулём.
+            if (std::sqrt(dx * dx + dy * dy) < minMove) continue;
+            dir[i] = std::atan2(dy, dx);
+            dirOk[i] = 1;
+        }
+        // УГЛОВОЕ СМЕЩЕНИЕ ПО ЗАДЕРЖКЕ. Брать производную направления нельзя:
+        // деление на dt раздувает собственный шум оценки в двадцать раз, и он
+        // забивает искомое (первый вариант этого стенда так и мерил, получал
+        // rms вчетверо больше среднего - это и был его шум). Зато три источника
+        // по-разному зависят от задержки, и это их разделяет:
+        //   шум оценки        - <dtheta^2> постоянно;
+        //   диффузия курса    - <dtheta^2> растёт линейно (= 2*D*tau);
+        //   постоянная дуга   - <dtheta^2> растёт квадратично.
+        // Поэтому печатается вся таблица, а не одно число.
+        std::printf("  --- снос курса на пробеге (направление хода по окну %.1f с, вперёд, вдали от стен) ---\n",
+                    winSec);
+        std::printf("  вперёд %.0f%%   вдали от стен %.0f%%\n",
+                    trk.empty() ? 0.0 : 100.0 * fwdSteps / trk.size(),
+                    trk.empty() ? 0.0 : 100.0 * clearSteps / trk.size());
+        std::printf("  задержка, с :   rms dtheta, гр    знаковое, гр      пар\n");
+        const double lags[] = {0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0};
+        for (double lagSec : lags) {
+            const std::size_t L = static_cast<std::size_t>(lagSec / static_cast<double>(dt));
+            if (L == 0 || L >= trk.size()) continue;
+            double sq = 0.0, net = 0.0;
+            long n = 0;
+            for (std::size_t i = 0; i + L < trk.size(); ++i) {
+                if (!dirOk[i] || !dirOk[i + L]) continue;
+                // Весь промежуток между двумя оценками тоже должен быть
+                // чистым ходом вперёд - иначе в пару попадёт реверс.
+                if (!spanClean(i, i + L)) continue;
+                double d = dir[i + L] - dir[i];
+                while (d > kPi) d -= 2.0 * kPi;
+                while (d < -kPi) d += 2.0 * kPi;
+                d *= 180.0 / kPi;
+                sq += d * d;
+                net += d;
+                ++n;
+            }
+            if (n > 0) {
+                std::printf("  %10.1f  : %14.3f  %14.3f  %9ld\n", lagSec, std::sqrt(sq / n), net / n, n);
+            } else {
+                std::printf("  %10.1f  : %14s  %14s  %9d\n", lagSec, "-", "-", 0);
+            }
+        }
         return 0;
     }
 

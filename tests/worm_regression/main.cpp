@@ -54,12 +54,45 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
 namespace {
 
 constexpr float kBodyLength = 576.0f;
+// РАЗМЕР АРЕНЫ, множителем к полю 200x150 клеток (это 21.5 x 14.0 длин тела).
+//
+// ПОДНЯТ 1 -> 2 (раздел 36). Прежняя арена контаминировала ГЛАВНЫЙ здешний
+// показатель качества - эффективность пути: она есть нетто/путь, а червь на
+// такой арене за 125 с замера доезжает до края и разворачивается о стену.
+// Разворот у стены делает containBody, к животному он отношения не имеет.
+// Замер стоимости (те же семена, те же параметры, менялся ТОЛЬКО множитель):
+//   x1: агар эфф 0.549 75% бара, вода 0.479 71%
+//   x2: агар эфф 0.585 75% бара, вода 0.641 83%
+//   x4: агар эфф 0.585 75% бара, вода 0.651 83%
+// То есть стена съедала треть эффективности воды. Цена систематическая, а не
+// шумовая, и что хуже - она РАСТЁТ СО СКОРОСТЬЮ: чем быстрее червь, тем
+// больше пути он проходит за те же 125 с и тем чаще упирается. Поэтому гейт
+// штрафовал ровно ту величину, которую мы поднимаем, и все прежние решения по
+// темпу принимались против частично искусственного порога.
+//
+// Скорость и частота при этом не меняются вовсе (агар 0.11711 -> 0.11668,
+// частота 0.2582 в обоих) - стена курс заворачивала, но не тормозила.
+//
+// Выбрано 2, а не 4: x4 добавляет к воде ещё 0.010 (1.6%), а времени стоит
+// 433 с против 91 с. Поле еды диффундирует всей площадью каждый шаг, поэтому
+// цена растёт как площадь, а выигрыш уже насытился.
+//
+// Биологически x2 тоже ближе: чашка в опыте 5-10 см при черве 1 мм, то есть
+// 50-100 длин тела поперёк. x1 давал 21, x2 даёт 43.
+constexpr int kArenaScaleDefault = 2;
+int arenaScale() {
+    const char* env = std::getenv("WORM_ARENA_SCALE");
+    if (!env) return kArenaScaleDefault;
+    const int v = std::atoi(env);
+    return v > 0 ? v : kArenaScaleDefault;
+}
 constexpr int kFieldCols = 200, kFieldRows = 150;
 constexpr float kHexSpacing = 36.0f;
 constexpr float kDragAgar = 40.0f, kDragWater = 1.7f;
@@ -110,6 +143,10 @@ constexpr float kMinFreqHz = 0.001f;       // not oscillating at all (silent net
 // agar mean efficiency 0.558 / 81% выше 0.40-бара, water 0.566 / 92%,
 // survival 48/48 на обеих средах. Держать заниженные пороги больше не за
 // чем - они бы просто скрывали будущие регрессии.
+//
+// ВНИМАНИЕ (раздел 36): все числа эффективности ВЫШЕ в этом комментарии
+// измерены на прежней арене 200x150 и потому занижены - см. kArenaScaleDefault.
+// Сравнивать их с сегодняшними напрямую нельзя.
 constexpr float kMinMeanEfficiency = 0.35f;
 constexpr double kMinFractionAboveQualityBar = 0.50;
 constexpr float kQualityBarEfficiency = 0.40f;  // same bar used throughout this project's calibration history
@@ -208,7 +245,7 @@ Measurement runTrial(int seed, float dragNormal, int warmupSteps, int measureSte
     sim.params.dragTangent = 1.0f;
     sim.params.dragNormal = dragNormal;
     std::srand(static_cast<unsigned>(seed));
-    sim.setBounds(glm::vec2(0.0f), kFieldCols, kFieldRows, kHexSpacing);
+    sim.setBounds(glm::vec2(0.0f), kFieldCols * arenaScale(), kFieldRows * arenaScale(), kHexSpacing);
     const float dt = sim.params.dt.load();
 
     for (int i = 0; i < warmupSteps; ++i) sim.step();
