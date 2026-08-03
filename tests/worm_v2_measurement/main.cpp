@@ -831,6 +831,20 @@ int main(int argc, char** argv) {
             const float t = static_cast<float>(std::atof(argv[7]));
             if (t > 0.0f) sim.params.commandActiveTau = t;
         }
+        // argv[8]: synapticScale - множитель на chemGain и gapGain сразу, см.
+        // одноимённый разбор в режиме netact.
+        if (argc > 8) {
+            const float s = static_cast<float>(std::atof(argv[8]));
+            if (s >= 0.0f) {
+                sim.params.chemGain = sim.params.chemGain.load() * s;
+                sim.params.gapGain = sim.params.gapGain.load() * s;
+            }
+        }
+        // argv[9]: classWindowSplit - см. Params::classWindowSplit.
+        if (argc > 9) {
+            const float c = static_cast<float>(std::atof(argv[9]));
+            if (c >= 0.0f) sim.params.classWindowSplit = c;
+        }
         sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
         const float dt = sim.params.dt.load();
         const std::vector<std::string>& names = sim.neuronNames();
@@ -843,9 +857,23 @@ int main(int argc, char** argv) {
             std::printf("command: не найдены AVAL/AVAR/AVBL/AVBR\n");
             return 1;
         }
+        // ПУЛЫ МОТОНЕЙРОНОВ. У червя антагонизм вперёд/назад держится не на
+        // паре интернейронов, а на конкуренции классов: B (DB/VB) ведёт ход
+        // вперёд, A (DA/VA) назад, и тормозят их друг через друга GABAergic
+        // D-класса, которые в коннектоме есть. Если решение где-то и живёт, то
+        // скорее здесь, чем в AVA/AVB.
+        std::vector<int> poolA, poolB;
+        for (std::size_t k = 0; k < names.size(); ++k) {
+            const std::string& s = names[k];
+            if (s.size() < 3) continue;
+            const bool dv = (s[0] == 'D' || s[0] == 'V');
+            if (!dv || !std::isdigit(static_cast<unsigned char>(s[2]))) continue;
+            if (s[1] == 'A') poolA.push_back(static_cast<int>(k));
+            else if (s[1] == 'B') poolB.push_back(static_cast<int>(k));
+        }
         WormSim::Snapshot snap;
         const int warmup = 600;
-        std::vector<double> ava, avb;
+        std::vector<double> ava, avb, pa, pb;
         std::vector<int> phase;
         for (int i = 0; i < steps; ++i) {
             sim.step();
@@ -853,6 +881,11 @@ int main(int argc, char** argv) {
             sim.snapshot(snap);
             ava.push_back(0.5 * (snap.nodeStates[avaL] + snap.nodeStates[avaR]));
             avb.push_back(0.5 * (snap.nodeStates[avbL] + snap.nodeStates[avbR]));
+            double sa = 0.0, sb = 0.0;
+            for (int k : poolA) sa += snap.nodeStates[k];
+            for (int k : poolB) sb += snap.nodeStates[k];
+            pa.push_back(poolA.empty() ? 0.0 : sa / poolA.size());
+            pb.push_back(poolB.empty() ? 0.0 : sb / poolB.size());
             phase.push_back(sim.debugLocomotionPhase());
         }
         const std::size_t n = ava.size();
@@ -907,6 +940,37 @@ int main(int argc, char** argv) {
         std::printf("  разность в фазе ВПЕРЁД=%+.5f (n=%ld), в фазе НАЗАД=%+.5f (n=%ld)\n",
                     nFwd ? sumFwd / nFwd : 0.0, nFwd, nRev ? sumRev / nRev : 0.0, nRev);
         std::printf("     (сейчас фазу бросает frand(), так что разрыв около нуля = слой отключён от решения)\n");
+        // То же самое для пулов A и B.
+        {
+            const double mPA = meanOf(pa), mPB = meanOf(pb);
+            double vPA = 0.0, vPB = 0.0, cPab = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const double da = pa[i] - mPA, db = pb[i] - mPB;
+                vPA += da * da; vPB += db * db; cPab += da * db;
+            }
+            vPA /= n; vPB /= n; cPab /= n;
+            const double rP = (vPA > 1e-18 && vPB > 1e-18) ? cPab / std::sqrt(vPA * vPB) : 0.0;
+            std::vector<double> dp(n);
+            for (std::size_t i = 0; i < n; ++i) dp[i] = pa[i] - pb[i];
+            const double mDP = meanOf(dp);
+            double vDP = 0.0;
+            for (double x : dp) vDP += (x - mDP) * (x - mDP);
+            vDP /= n;
+            double sf = 0.0, sr = 0.0; long nf = 0, nr = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                if (phase[i] == 0) { sf += dp[i]; ++nf; } else if (phase[i] == 1) { sr += dp[i]; ++nr; }
+            }
+            std::printf("  ПУЛЫ МОТОНЕЙРОНОВ (A=%zu нейронов назад, B=%zu вперёд):\n",
+                        poolA.size(), poolB.size());
+            std::printf("    A: среднее=%+.5f sd=%.5f   B: среднее=%+.5f sd=%.5f\n",
+                        mPA, std::sqrt(vPA), mPB, std::sqrt(vPB));
+            std::printf("    КОРРЕЛЯЦИЯ r(A,B) = %+.4f   разность A-B: среднее=%+.5f sd=%.5f\n",
+                        rP, mDP, std::sqrt(vDP));
+            std::printf("    разность в фазе ВПЕРЁД=%+.5f, НАЗАД=%+.5f  (разрыв=%+.5f, в sd: %.2f)\n",
+                        nf ? sf / nf : 0.0, nr ? sr / nr : 0.0,
+                        (nr && nf) ? (sr / nr - sf / nf) : 0.0,
+                        (nr && nf && vDP > 1e-18) ? std::fabs(sr / nr - sf / nf) / std::sqrt(vDP) : 0.0);
+        }
         return 0;
     }
 
@@ -926,6 +990,17 @@ int main(int argc, char** argv) {
         WormSim sim("worm_data/celegans_herm.connectome");
         sim.params.dragTangent = 1.0f;
         sim.params.dragNormal = dragNormal;
+        // argv[5]: synapticScale - ОДИН множитель на chemGain и gapGain сразу,
+        // при неизменном leakScale. Именно это отношение задаёт рабочую точку:
+        // общий множитель на все три - чистое перемасштабирование времени и V
+        // не двигает вовсе (V = f/k, и f, и k растут одинаково).
+        if (argc > 5) {
+            const float s = static_cast<float>(std::atof(argv[5]));
+            if (s >= 0.0f) {
+                sim.params.chemGain = sim.params.chemGain.load() * s;
+                sim.params.gapGain = sim.params.gapGain.load() * s;
+            }
+        }
         sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
         const std::vector<std::string>& names = sim.neuronNames();
         WormSim::Snapshot snap;
@@ -980,6 +1055,30 @@ int main(int argc, char** argv) {
         };
         std::printf("netact: seed=%u steps=%d drag=%.2f  выборок=%ld  узлов=%zu\n",
                     seed, steps, dragNormal, samples, sum.size());
+        // ВЫЧИСЛИТЕЛЬНОЕ УСИЛЕНИЕ СЕТИ. Активация есть sigmoid(V) при theta=0,
+        // slope=1, значит крутизна равна s*(1-s) и максимальна (0.25) при V=0.
+        // Нейрон, уехавший в плечо, входной сигнал почти не передаёт: сеть из
+        // насыщенных узлов не вычисляет, чем бы её ни возбуждали. Поэтому
+        // средняя крутизна по не-мышечным узлам - прямая мера того, способна ли
+        // сеть вообще на что-то, кроме проведения.
+        {
+            double slopeSum = 0.0, vSum = 0.0;
+            long satHigh = 0, satLow = 0, live = 0;
+            for (const Row& r : neurons) {
+                const double v = sum[r.idx] / samples;
+                const double s = 1.0 / (1.0 + std::exp(-v));
+                const double slope = s * (1.0 - s);
+                slopeSum += slope; vSum += v;
+                if (s > 0.90) ++satHigh;
+                else if (s < 0.10) ++satLow;
+                else ++live;
+            }
+            const double nN = static_cast<double>(neurons.size());
+            std::printf("  РАБОЧАЯ ТОЧКА: средний V=%+.3f  средняя крутизна=%.4f (%.0f%% от максимума 0.25)\n",
+                        vSum / nN, slopeSum / nN, 100.0 * (slopeSum / nN) / 0.25);
+            std::printf("    в насыщении сверху (s>0.90): %ld   снизу (s<0.10): %ld   в рабочей зоне: %ld\n",
+                        satHigh, satLow, live);
+        }
         report(neurons, "НЕЙРОНЫ");
         report(muscles, "МЫШЦЫ");
         // КОМАНДНЫЕ ИНТЕРНЕЙРОНЫ отдельно. У настоящего червя выбор

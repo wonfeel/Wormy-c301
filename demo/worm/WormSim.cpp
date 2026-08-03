@@ -352,7 +352,9 @@ WormSim::WormSim(const std::string& connectomeDataPath)
         } else if (parseMotorNeuron(name, motorPos, motorDorsal)) {
             // posInnervation заполняется ниже (нужен полный m_loaded.muscles,
             // а он дочитывается этим же циклом) - пока дублируем синтетическую.
-            m_motorNeurons.push_back({i, motorPos, motorDorsal, motorPos, motorPos});
+            MotorNeuron mn{i, motorPos, motorDorsal, motorPos, motorPos};
+            mn.bClass = (name.size() >= 2 && name[1] == 'B');  // DB/VB - см. MotorNeuron::bClass
+            m_motorNeurons.push_back(mn);
             m_isMotorNeuron[i] = true;
         }
 
@@ -1051,26 +1053,40 @@ void WormSim::applyProprioception(const std::vector<float>& bodyAngles) {
     // задаётся только этим.
     const bool anteriorParam = params.proprioceptiveAnterior.load() != 0;
     const bool anteriorWindow = (m_locomotion == Locomotion::Reverse) ? !anteriorParam : anteriorParam;
+    // РАЗВЕДЕНИЕ ОКОН ПО КЛАССАМ - см. Params::classWindowSplit. При 0
+    // работает только глобальный переворот выше (побитово прежнее поведение),
+    // при 1 - окно задаётся классом нейрона и не зависит от фазы вовсе.
+    const float classSplit = std::clamp(params.classWindowSplit.load(), 0.0f, 1.0f);
     for (const MotorNeuron& mn : m_motorNeurons) {
         // Головные - вне проприоцептивной петли, см. MotorNeuron::head.
         if (mn.head) continue;
         const int mnPos = useInnervationPos ? mn.posInnervation : mn.posSynthetic;
         const int self = std::clamp(mnPos - 1, 0, std::max(0, n - 1));
+        // Окно по классу: B читает кривизну в ту же сторону, что глобальное
+        // окно хода вперёд, A - в противоположную (Chalfie et al. 1985).
+        const bool classWindow = mn.bClass ? anteriorParam : !anteriorParam;
         // См. Params::proprioceptiveAnterior. Оба окна включают собственную
         // позицию нейрона и имеют одинаковую ширину - отличается только
         // сторона, в которую они смотрят.
-        const int start = anteriorWindow ? std::max(0, self - window + 1) : self;
-        const int end = anteriorWindow ? (self + 1) : std::min(n, self + window);
-        float sum = 0.0f;
-        for (int i = start; i < end; ++i) sum += bodyAngles[static_cast<std::size_t>(i)];
-        const float avgAngle = (end > start) ? sum / static_cast<float>(end - start) : 0.0f;
-        float feedback = mn.dorsal ? (gain * avgAngle) : (-gain * avgAngle);
-
-        float loadSum = 0.0f;
-        const int loadEnd = std::min(static_cast<int>(segLoad.size()), end);
-        for (int i = start; i < loadEnd; ++i) loadSum += segLoad[static_cast<std::size_t>(i)];
-        const float avgLoad = (loadEnd > start) ? loadSum / static_cast<float>(loadEnd - start) : 0.0f;
-        feedback += localMechanoGain * (avgLoad / dragNormal);
+        const auto windowFeedback = [&](bool anterior) {
+            const int start = anterior ? std::max(0, self - window + 1) : self;
+            const int end = anterior ? (self + 1) : std::min(n, self + window);
+            float sum = 0.0f;
+            for (int i = start; i < end; ++i) sum += bodyAngles[static_cast<std::size_t>(i)];
+            const float avgAngle = (end > start) ? sum / static_cast<float>(end - start) : 0.0f;
+            float fb = mn.dorsal ? (gain * avgAngle) : (-gain * avgAngle);
+            float loadSum = 0.0f;
+            const int loadEnd = std::min(static_cast<int>(segLoad.size()), end);
+            for (int i = start; i < loadEnd; ++i) loadSum += segLoad[static_cast<std::size_t>(i)];
+            const float avgLoad = (loadEnd > start) ? loadSum / static_cast<float>(loadEnd - start) : 0.0f;
+            return fb + localMechanoGain * (avgLoad / dragNormal);
+        };
+        // classSplit==0 берёт РОВНО прежнюю ветку и не считает вторую - иначе
+        // побитовость держалась бы на точности умножения на 0.
+        float feedback = windowFeedback(anteriorWindow);
+        if (classSplit > 0.0f) {
+            feedback = (1.0f - classSplit) * feedback + classSplit * windowFeedback(classWindow);
+        }
 
         feedback = std::clamp(feedback, -10.0f, 10.0f); // дешёвая страховка, не должно даже срабатывать
         net.set_input(mn.id, feedback + signedNoise(noiseAmp));
