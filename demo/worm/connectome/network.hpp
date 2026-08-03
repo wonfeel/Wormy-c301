@@ -306,6 +306,29 @@ public:
     }
     void set_motor_leak_scale(float scale) { motor_leak_scale_ = scale; }
 
+    // УТЕЧКА КОМАНДНОГО СЛОЯ - тот же механизм, что у мотонейронов выше, но
+    // для другой группы и по прямо противоположной причине.
+    //
+    // Мотонейронам утечку ПОДНИМАЛИ, чтобы они не сглаживали быстрый сигнал.
+    // Командным её надо ОПУСКАТЬ, чтобы у них вообще появилась память.
+    //
+    // Измерено на отгружаемой точке (Test_worm_v2_measurement command): время
+    // спада автокорреляции разности AVA-AVB = 0.1 с. Решение "идти вперёд или
+    // назад" у червя держится 10-30 с, то есть в сто-триста раз дольше. При
+    // leak_scale_=9 постоянная времени 1/k у всех нейронов около десятой доли
+    // секунды, поэтому НИ ОДИН нейрон не может удержать состояние на
+    // поведенческом масштабе, и у сети физически не может быть аттракторов,
+    // из которых такое решение могло бы родиться.
+    //
+    // МНОЖИТЕЛЬ, конвенция та же, что у мотонейронов: 1.0 = не трогать. Пустой
+    // список целей и множитель 1.0 дают побитово прежнее поведение (умножение
+    // на ровно 1.0f по IEEE754 точное).
+    void set_command_leak_targets(std::vector<NeuronId> ids) {
+        std::fill(is_command_neuron_.begin(), is_command_neuron_.end(), 0);
+        for (NeuronId id : ids) is_command_neuron_[id] = 1;
+    }
+    void set_command_leak_scale(float scale) { command_leak_scale_ = scale; }
+
 private:
     std::vector<NeuronType> types_;
     std::vector<NeuronParams> params_;
@@ -364,6 +387,10 @@ private:
     // Утечка мотонейронов - см. set_motor_leak_targets/set_motor_leak_scale выше.
     std::vector<char> is_motor_neuron_;
     float motor_leak_scale_ = 1.0f;
+
+    // Утечка командного слоя - см. set_command_leak_targets/scale выше.
+    std::vector<char> is_command_neuron_;
+    float command_leak_scale_ = 1.0f;
 
     // Сенсорная адаптация - см. set_sensory_adaptation(_targets) выше.
     // sensory_have_prev_ отличает "производная ещё неизвестна" от "производная

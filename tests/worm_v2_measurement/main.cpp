@@ -791,6 +791,115 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // ./exe command <seed> <steps> <dragNormal>
+    // ДИНАМИКА КОМАНДНОГО СЛОЯ. Вопрос ровно один: годится ли пара AVA/AVB как
+    // решающая ПРЯМО СЕЙЧАС, или её придётся делать бистабильной.
+    //
+    // Чтобы пара решала "вперёд или назад", от неё нужно три свойства, и все
+    // три здесь меряются раздельно:
+    //   1. АНТИКОРРЕЛЯЦИЯ. Победитель должен быть один. r(AVA,AVB) около +1
+    //      означает, что они просто вместе дышат от общего входа и никакого
+    //      выбора не делают.
+    //   2. БИМОДАЛЬНОСТЬ разности AVA-AVB. У решающей пары разность сидит в
+    //      одном из двух состояний, а не колеблется вокруг нуля. Меряется
+    //      избытком куртозиса: у двугорбого он отрицательный, у гауссова 0.
+    //   3. МЕДЛЕННОСТЬ. Реверсы у червя раз в 10-30 с, значит время спада
+    //      автокорреляции разности должно быть того же порядка. Если разность
+    //      дрожит за доли секунды, решение по ней будет дребезжать.
+    if (argc >= 2 && std::string(argv[1]) == "command") {
+        const unsigned seed = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 12345u;
+        const int steps = argc > 3 ? std::atoi(argv[3]) : 12000;
+        const float dragNormal = argc > 4 ? static_cast<float>(std::atof(argv[4])) : kDragAgar;
+        g_arenaScale = 4;
+        std::srand(seed);
+        WormSim sim("worm_data/celegans_herm.connectome");
+        sim.params.dragTangent = 1.0f;
+        sim.params.dragNormal = dragNormal;
+        // argv[5]: commandLeakScale - множитель утечки командного слоя, см.
+        // Params::commandLeakScale. <0 или отсутствует = отгружаемое значение.
+        if (argc > 5) {
+            const float c = static_cast<float>(std::atof(argv[5]));
+            if (c >= 0.0f) sim.params.commandLeakScale = c;
+        }
+        sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
+        const float dt = sim.params.dt.load();
+        const std::vector<std::string>& names = sim.neuronNames();
+        const auto idOf = [&](const char* nm) -> int {
+            for (std::size_t k = 0; k < names.size(); ++k) if (names[k] == nm) return static_cast<int>(k);
+            return -1;
+        };
+        const int avaL = idOf("AVAL"), avaR = idOf("AVAR"), avbL = idOf("AVBL"), avbR = idOf("AVBR");
+        if (avaL < 0 || avaR < 0 || avbL < 0 || avbR < 0) {
+            std::printf("command: не найдены AVAL/AVAR/AVBL/AVBR\n");
+            return 1;
+        }
+        WormSim::Snapshot snap;
+        const int warmup = 600;
+        std::vector<double> ava, avb;
+        std::vector<int> phase;
+        for (int i = 0; i < steps; ++i) {
+            sim.step();
+            if (i < warmup) continue;
+            sim.snapshot(snap);
+            ava.push_back(0.5 * (snap.nodeStates[avaL] + snap.nodeStates[avaR]));
+            avb.push_back(0.5 * (snap.nodeStates[avbL] + snap.nodeStates[avbR]));
+            phase.push_back(sim.debugLocomotionPhase());
+        }
+        const std::size_t n = ava.size();
+        if (n < 100) { std::printf("command: слишком мало выборок\n"); return 1; }
+        const auto meanOf = [](const std::vector<double>& v) {
+            double s = 0.0; for (double x : v) s += x; return s / static_cast<double>(v.size());
+        };
+        const double mA = meanOf(ava), mB = meanOf(avb);
+        double vA = 0.0, vB = 0.0, cov = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double da = ava[i] - mA, db = avb[i] - mB;
+            vA += da * da; vB += db * db; cov += da * db;
+        }
+        vA /= n; vB /= n; cov /= n;
+        const double r = (vA > 1e-18 && vB > 1e-18) ? cov / std::sqrt(vA * vB) : 0.0;
+        // Разность и её форма распределения.
+        std::vector<double> d(n);
+        for (std::size_t i = 0; i < n; ++i) d[i] = ava[i] - avb[i];
+        const double mD = meanOf(d);
+        double v2 = 0.0, v4 = 0.0;
+        for (double x : d) { const double e = x - mD; v2 += e * e; v4 += e * e * e * e; }
+        v2 /= n; v4 /= n;
+        const double kurtExcess = (v2 > 1e-18) ? (v4 / (v2 * v2) - 3.0) : 0.0;
+        // Автокорреляция разности - время спада до 1/e.
+        double tauSec = -1.0;
+        for (std::size_t lag = 1; lag < n / 4; ++lag) {
+            double c = 0.0;
+            for (std::size_t i = 0; i + lag < n; ++i) c += (d[i] - mD) * (d[i + lag] - mD);
+            c /= static_cast<double>(n - lag);
+            if (v2 > 1e-18 && c / v2 < std::exp(-1.0)) {
+                tauSec = static_cast<double>(lag) * static_cast<double>(dt);
+                break;
+            }
+        }
+        // Связь разности с ТЕКУЩЕЙ фазой. Сейчас фазу бросает frand(), поэтому
+        // ожидается ноль - и это подтверждение, что слой отключён от решения.
+        double sumFwd = 0.0, sumRev = 0.0; long nFwd = 0, nRev = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (phase[i] == 0) { sumFwd += d[i]; ++nFwd; }
+            else if (phase[i] == 1) { sumRev += d[i]; ++nRev; }
+        }
+        std::printf("command: seed=%u steps=%d drag=%.2f  выборок=%zu\n", seed, steps, dragNormal, n);
+        std::printf("  AVA: среднее=%+.5f sd=%.5f\n", mA, std::sqrt(vA));
+        std::printf("  AVB: среднее=%+.5f sd=%.5f\n", mB, std::sqrt(vB));
+        std::printf("  1. КОРРЕЛЯЦИЯ r(AVA,AVB) = %+.4f   (нужно около -1, +1 = дышат вместе)\n", r);
+        std::printf("  2. РАЗНОСТЬ AVA-AVB: среднее=%+.5f sd=%.5f  избыток куртозиса=%+.3f\n",
+                    mD, std::sqrt(v2), kurtExcess);
+        std::printf("     (двугорбое даёт заметно отрицательный, гауссово 0, редкие выбросы - положительный)\n");
+        std::printf("  3. ВРЕМЯ СПАДА автокорреляции разности = %s\n",
+                    tauSec >= 0.0 ? (std::to_string(tauSec) + " c").c_str() : "не спала за четверть прогона");
+        std::printf("     (нужен порядок 10-30 с, чтобы решение не дребезжало)\n");
+        std::printf("  разность в фазе ВПЕРЁД=%+.5f (n=%ld), в фазе НАЗАД=%+.5f (n=%ld)\n",
+                    nFwd ? sumFwd / nFwd : 0.0, nFwd, nRev ? sumRev / nRev : 0.0, nRev);
+        std::printf("     (сейчас фазу бросает frand(), так что разрыв около нуля = слой отключён от решения)\n");
+        return 0;
+    }
+
     // ./exe netact <seed> <steps> <dragNormal>
     // АКТИВНОСТЬ СЕТИ ПОУЗЛОВО. Вопрос ровно один: сколько из 401 узла реально
     // участвует в поведении, а сколько стоит мёртвым грузом. Меряется

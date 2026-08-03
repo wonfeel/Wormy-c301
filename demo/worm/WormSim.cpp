@@ -408,6 +408,27 @@ WormSim::WormSim(const std::string& connectomeDataPath)
         for (const MotorNeuron& mn : m_motorNeurons) motorIds.push_back(mn.id);
         net.set_motor_leak_targets(std::move(motorIds));  // см. Params::motorLeakScale - множитель, а не гейн, дефолт 1.0
     }
+
+    // КОМАНДНЫЙ СЛОЙ. Собирается по именам, а не по типу узла: в данных
+    // коннектома все они помечены Processing, как ещё две сотни нейронов, и
+    // отличить их можно только по идентичности клетки. Список - ровно те
+    // интернейроны, которые у C. elegans определяют направление хода
+    // (AVA/AVE/AVD - назад, AVB/PVC - вперёд), плюс релейные AIB/AIY/AIZ,
+    // через которые к ним приходит хемосенсорика.
+    {
+        static const char* kCommandNames[] = {
+            "AVAL", "AVAR", "AVBL", "AVBR", "AVDL", "AVDR", "AVEL", "AVER",
+            "PVCL", "PVCR", "AIBL", "AIBR", "AIYL", "AIYR", "AIZL", "AIZR",
+        };
+        std::vector<connectome::NeuronId> commandIds;
+        for (connectome::NeuronId i = 0; i < net.size(); ++i) {
+            for (const char* nm : kCommandNames) {
+                if (m_loaded.names[i] == nm) { commandIds.push_back(i); break; }
+            }
+        }
+        m_commandIds = commandIds;
+        net.set_command_leak_targets(std::move(commandIds));
+    }
     // AFD - нейроны с собственной памятью (адаптирующийся порог, см.
     // Network::set_sensory_adaptation и applyTemperatureDrive). Начальный порог
     // - стартовая cultivationTemp: животное приходит в модель, уже имея опыт
@@ -1187,6 +1208,7 @@ void WormSim::step() {
     // пропускная способность, обслуживавшая тот же CPG) удалён.
     net.set_motor_leak_scale(params.motorLeakScale.load() *
                               (1.0f + params.dopamineMotorLeakGain.load() * m_dopamineTone));
+    net.set_command_leak_scale(params.commandLeakScale.load());
 
     const float dt = params.dt.load();
 

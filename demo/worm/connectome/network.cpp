@@ -35,6 +35,7 @@ Network::Network(std::vector<NeuronType> types, std::vector<NeuronParams> params
     peptide_release_.assign(n, 0.0f);
     next_peptide_release_.assign(n, 0.0f);
     is_motor_neuron_.assign(n, 0);
+    is_command_neuron_.assign(n, 0);
     muscle_calcium_.assign(n, 0.0f);
     next_muscle_calcium_.assign(n, 0.0f);
     sensory_threshold_.assign(n, 0.0);
@@ -189,7 +190,12 @@ void Network::step(float dt) {
                 // раньше - ничего не меняется, пока WormSim явно не задаст
                 // список моторных ID и/или ненулевое отклонение от 1.0.
                 const float motorMult = (!is_output && is_motor_neuron_[i]) ? motor_leak_scale_ : 1.0f;
-                const float leak = is_output ? (p.leak * muscle_leak_scale_) : (p.leak * leak_scale_ * motorMult);
+                // cmdMult - см. set_command_leak_targets/set_command_leak_scale:
+                // дефолт 1.0 при пустом списке целей даёт прежнее произведение
+                // побитово (умножение на ровно 1.0f точное по IEEE754).
+                const float cmdMult = (!is_output && is_command_neuron_[i]) ? command_leak_scale_ : 1.0f;
+                const float leak = is_output ? (p.leak * muscle_leak_scale_)
+                                             : (p.leak * leak_scale_ * motorMult * cmdMult);
                 // sensory_drive_scratch_ тождественно 0 для всех, кроме
                 // нейронов из sensory_ids_ (список пуст по умолчанию), так что
                 // без сенсорной адаптации это побитово прежний external_input_.
