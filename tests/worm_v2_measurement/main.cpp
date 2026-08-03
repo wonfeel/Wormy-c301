@@ -791,6 +791,143 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // ./exe yaw <seed> <steps> <dragNormal> <arenaScale>
+    // РЫСКАНИЕ: откуда берётся поворот тела в фазе прямого хода. Раздел 33.5
+    // назвал это последним узким местом, но не разделил две возможности:
+    //   - ПОСТОЯННЫЙ ИЗГИБ ("банан"): тело в среднем согнуто, и червь плывёт
+    //     по дуге. Тогда поворот односторонний и накапливается линейно;
+    //   - СЛУЧАЙНОЕ БЛУЖДАНИЕ: повороты равновероятны по знаку, накапливаются
+    //     как корень из времени.
+    // Различаются они отношением |нетто-поворот| / сумма|поворотов|: у дуги оно
+    // близко к 1, у блуждания падает как 1/sqrt(N).
+    //
+    // Меряется ОТГРУЖЕННЫЙ червь: ни один параметр не переопределяется, кроме
+    // среды. Курс берётся по вектору хвост->голова, а не по первому сегменту:
+    // тот отражает ещё и работу головных мышц, а нас интересует тело целиком.
+    if (argc >= 2 && std::string(argv[1]) == "yaw") {
+        const unsigned seed = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 12345u;
+        const int steps = argc > 3 ? std::atoi(argv[3]) : 8000;
+        const float dragNormal = argc > 4 ? static_cast<float>(std::atof(argv[4])) : kDragWater;
+        g_arenaScale = argc > 5 ? std::max(1, std::atoi(argv[5])) : 8;
+        std::srand(seed);
+        WormSim sim("worm_data/celegans_herm.connectome");
+        sim.params.dragTangent = 1.0f;
+        sim.params.dragNormal = dragNormal;
+        // argv[6]: dragSettleGain. ВАЖНО для проверки теоремы Пёрселла: при
+        // ненулевом значении поперечное трение получает пер-сегментную добавку
+        // от памяти проседания, то есть c_n != c_t даже когда dragNormal ==
+        // dragTangent. Чтобы получить ДЕЙСТВИТЕЛЬНО изотропное трение, его
+        // надо занулить явно. <0 = оставить отгруженное значение.
+        if (argc > 6) {
+            const float g = static_cast<float>(std::atof(argv[6]));
+            if (g >= 0.0f) sim.params.dragSettleGain = g;
+        }
+        sim.setBounds(glm::vec2(0.0f), kFieldCols * g_arenaScale, kFieldRows * g_arenaScale, kHexSpacing);
+        const float dt = sim.params.dt.load();
+        WormSim::Snapshot snap;
+        double netHeading = 0.0, absHeading = 0.0, bendSum = 0.0, bendSqSum = 0.0;
+        long bendCount = 0;
+        float prevHeading = 0.0f;
+        bool havePrev = false;
+        const int warmup = 600;
+        // Путь центроида и число полуволн изгиба - чтобы получить ГЛАВНУЮ
+        // величину теории RFT: сколько длин тела проходится за один цикл.
+        // Она не зависит ни от темпа сети, ни от предела сустава - только от
+        // формы волны и анизотропии трения, то есть меряет ровно модель трения.
+        double pathLen = 0.0, fwdLen = 0.0;
+        double startCx = 0.0, startCy = 0.0, prevCx = 0.0, prevCy = 0.0, lastCx = 0.0, lastCy = 0.0;
+        bool haveCentroid = false;
+        int crossings = 0;
+        float prevMidBend = 0.0f;
+        bool haveMidBend = false;
+        for (int i = 0; i < steps; ++i) {
+            sim.step();
+            if (i < warmup) continue;
+            sim.snapshot(snap);
+            const std::size_t np = snap.pointsX.size();
+            if (np < 3) continue;
+            // Курс тела: хвост -> голова.
+            const float hx = snap.pointsX[0] - snap.pointsX[np - 1];
+            const float hy = snap.pointsY[0] - snap.pointsY[np - 1];
+            const float heading = std::atan2(hy, hx);
+            if (havePrev) {
+                float d = heading - prevHeading;
+                while (d > kPi) d -= 2.0f * kPi;
+                while (d < -kPi) d += 2.0f * kPi;
+                netHeading += d;
+                absHeading += std::fabs(d);
+            }
+            prevHeading = heading;
+            havePrev = true;
+            // Суммарный ЗНАКОВЫЙ изгиб тела: сумма углов поворота между
+            // соседними сегментами. Ноль = тело в среднем прямое, ненулевое
+            // среднее = постоянный изгиб в одну сторону.
+            double totalBend = 0.0;
+            for (std::size_t k = 1; k + 1 < np; ++k) {
+                const float ax = snap.pointsX[k] - snap.pointsX[k - 1];
+                const float ay = snap.pointsY[k] - snap.pointsY[k - 1];
+                const float bx = snap.pointsX[k + 1] - snap.pointsX[k];
+                const float by = snap.pointsY[k + 1] - snap.pointsY[k];
+                totalBend += std::atan2(ax * by - ay * bx, ax * bx + ay * by);
+            }
+            bendSum += totalBend;
+            bendSqSum += totalBend * totalBend;
+            ++bendCount;
+
+            double cx = 0.0, cy = 0.0;
+            for (std::size_t k = 0; k < np; ++k) { cx += snap.pointsX[k]; cy += snap.pointsY[k]; }
+            cx /= static_cast<double>(np); cy /= static_cast<double>(np);
+            if (haveCentroid) {
+                pathLen += std::sqrt((cx - prevCx) * (cx - prevCx) + (cy - prevCy) * (cy - prevCy));
+                // ЗНАКОВОЕ ПРОДВИЖЕНИЕ - проекция смещения центроида на ось
+                // тела. Именно оно и есть предмет теории RFT: сколько тело
+                // проползает ВПЕРЁД за цикл. Не зависит от того, куда червь
+                // при этом развернулся, в отличие от нетто-смещения.
+                fwdLen += (cx - prevCx) * std::cos(heading) + (cy - prevCy) * std::sin(heading);
+            } else {
+                startCx = cx; startCy = cy; haveCentroid = true;
+            }
+            prevCx = cx; prevCy = cy; lastCx = cx; lastCy = cy;
+
+            // Частота - по смене знака изгиба в СЕРЕДИНЕ тела (там волна уже
+            // развита и не искажена ни головной мускулатурой, ни свободным
+            // хвостом). Два пересечения нуля = один полный цикл.
+            const std::size_t mid = np / 2;
+            if (mid >= 1 && mid + 1 < np) {
+                const float ax = snap.pointsX[mid] - snap.pointsX[mid - 1];
+                const float ay = snap.pointsY[mid] - snap.pointsY[mid - 1];
+                const float bx = snap.pointsX[mid + 1] - snap.pointsX[mid];
+                const float by = snap.pointsY[mid + 1] - snap.pointsY[mid];
+                const float midBend = std::atan2(ax * by - ay * bx, ax * bx + ay * by);
+                if (haveMidBend && ((midBend > 0.0f) != (prevMidBend > 0.0f))) ++crossings;
+                prevMidBend = midBend;
+                haveMidBend = true;
+            }
+        }
+        const double seconds = (steps - warmup) * static_cast<double>(dt);
+        const double meanBend = bendCount ? bendSum / bendCount : 0.0;
+        const double rmsBend = bendCount ? std::sqrt(bendSqSum / bendCount) : 0.0;
+        std::printf("yaw: seed=%u steps=%d drag=%.2f arenaScale=%d  (%.0f c)\n", seed, steps, dragNormal,
+                    g_arenaScale, seconds);
+        std::printf("  нетто-поворот      = %+8.3f рад  (%+7.2f гр/с)\n", netHeading, netHeading * 180.0 / kPi / seconds);
+        std::printf("  сумма |поворотов|  = %8.3f рад  (%7.2f гр/с)\n", absHeading, absHeading * 180.0 / kPi / seconds);
+        std::printf("  доля направленного = %8.4f   (1 = дуга, ~0 = блуждание)\n",
+                    absHeading > 1e-9 ? std::fabs(netHeading) / absHeading : 0.0);
+        std::printf("  средний изгиб тела = %+8.4f рад   rms = %.4f   отношение = %.4f\n",
+                    meanBend, rmsBend, rmsBend > 1e-9 ? std::fabs(meanBend) / rmsBend : 0.0);
+        const double cycles = crossings / 2.0;
+        const double freq = seconds > 0 ? cycles / seconds : 0.0;
+        const double netDisp = std::sqrt((lastCx - startCx) * (lastCx - startCx) + (lastCy - startCy) * (lastCy - startCy));
+        std::printf("  частота=%.4f Гц  путь=%.3f BL  нетто=%.3f BL  прямизна=%.3f\n",
+                    freq, pathLen / kBodyLength, netDisp / kBodyLength,
+                    pathLen > 1e-9 ? netDisp / pathLen : 0.0);
+        std::printf("  ДЛИН ТЕЛА ЗА ЦИКЛ = %.4f  (вперёд по оси)   %.4f (по пути)   %.4f (по нетто)\n",
+                    cycles > 0 ? fwdLen / kBodyLength / cycles : 0.0,
+                    cycles > 0 ? pathLen / kBodyLength / cycles : 0.0,
+                    cycles > 0 ? netDisp / kBodyLength / cycles : 0.0);
+        return 0;
+    }
+
     // ./exe imprint <seed> <steps> <gradientSlope> <startFrac> <imprintTau>
     // ТЕРМАЛЬНЫЙ ИМПРИНТИНГ (Hedgecock & Russell 1975) - единственная в модели
     // память, переживающая опыт. Проверяет ровно то, что делает память памятью:

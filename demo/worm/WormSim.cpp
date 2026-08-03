@@ -1515,7 +1515,40 @@ void WormSim::step() {
     // V2 (см. WORM_V2_DESIGN.md разделы 3-4): три мгновенные adhesion-формулы
     // + кламп на |u_k| заменены памятью проседания (penetration_depth_) и
     // ограничением угловой скорости ориентации сустава - см. body.hpp/.cpp.
-    m_body.set_drag_settle(params.dragSettleTau.load(), params.dragSettleGain.load());
+    // ПРОСЕДАНИЕ В СУБСТРАТ - привязка к наличию самого субстрата.
+    //
+    // Механизм обоснован проседанием тела в агар (Rabets 2014), но применялся
+    // одинаково в обеих средах. Прямой замер (режим `yaw`, продвижение вперёд
+    // за цикл при разной анизотропии) показал, к чему это привело:
+    //
+    //   c_n/c_t=1.7 (вода): 0.459 с проседанием против 0.120 без него - 74%
+    //   c_n/c_t=40 (агар):  0.414 против 0.391 - 6%
+    //
+    // То есть на агаре, где механизм физически оправдан, он почти не работает,
+    // а в воде, где проседать не во что, даёт три четверти всей тяги.
+    //
+    // Что ещё важнее, эта тяга НЕ ИЗ ТРЕНИЯ. При c_n == c_t (изотропное
+    // трение) волна изгиба не может двигать тело вообще - это теорема Пёрселла,
+    // и без проседания модель ей подчиняется (0.073 длины за цикл против 0.391
+    // при анизотропии 40, рост монотонный). С проседанием при изотропном
+    // трении получается 0.434 - почти столько же, сколько при анизотропии 40.
+    // Механизм создаёт тягу в обход трения.
+    //
+    // Коэффициент 0.0 - прежнее поведение побитово (проседание одинаково в
+    // любой среде), 1.0 (отгружено) - оно пропорционально нормальному трению
+    // среды, то есть в воде исчезает. Цена и выигрыш измерены - см.
+    // Params::dragSettleSubstrateCoupling: агар не меняется вовсе, вода теряет
+    // 28% скорости и выигрывает 25% прямизны.
+    {
+        const float coupling = std::clamp(params.dragSettleSubstrateCoupling.load(), 0.0f, 1.0f);
+        float settleGain = params.dragSettleGain.load();
+        if (coupling > 0.0f) {
+            const float refDrag = std::max(1e-3f, params.mediumBendReferenceDrag.load());
+            const float substrate = std::clamp(params.dragNormal.load() / refDrag, 0.0f, 1.0f);
+            settleGain *= (1.0f - coupling) + coupling * substrate;
+        }
+        m_body.set_drag_settle(params.dragSettleTau.load(), settleGain);
+    }
     constexpr float kTwoPi = 6.28318530717958647692f;
     m_body.set_max_frame_angular_rate(kTwoPi * params.bodyFrameRateLimitHz.load());
     // Связь среды с темпом изгиба - см. Params::mediumBendCouplingKappa за
