@@ -83,7 +83,7 @@ protected:
         // applyNocturneImGuiTheme(): то же самое для панелей ImGui (вызов
         // не отсюда - ImGui-контекст на момент onInit() ещё не создан,
         // imguiInit() в Application.cpp происходит позже, в renderLoop();
-        // тема применяется один раз при первом реальном onImGui()).
+        // тема применяется один раз из onImGuiInit()).
         // Цвета САМОЙ симуляции (тело червя, тепловая карта нейронов,
         // подсветка еды) не трогаем - это данные, не декор.
         glClearColor(0.039f, 0.039f, 0.063f, 1.0f);
@@ -138,14 +138,26 @@ protected:
         glBindVertexArray(0);
     }
 
+    // Шрифт/тема грузятся здесь, а не в onImGui() - это единственное место
+    // между созданием ImGui-контекста (imguiInit(), Application.cpp) и первым
+    // ImGui::NewFrame(), где атлас шрифтов ещё НЕ заблокирован.
+    // AddFontFromFileTTF из onImGui() валил приложение прямо на старте:
+    // "Cannot modify a locked ImFontAtlas" (imgui_draw.cpp) - onImGui()
+    // выполняется МЕЖДУ NewFrame() и Render(), см. Application.h.
+    void onImGuiInit() override {
+#ifdef TESSERA_IMGUI_ENABLED
+        applyNocturneImGuiTheme();
+#endif
+    }
+
     void onImGui() override {
 #ifdef TESSERA_IMGUI_ENABLED
-        // Once, on the first frame that actually has an ImGui context
-        // (onInit() runs too early - see the comment by glClearColor above).
-        if (!m_themeApplied) {
-            applyNocturneImGuiTheme();
-            m_themeApplied = true;
-        }
+        // repeat=false - один переключатель за нажатие, а не за каждый кадр,
+        // пока клавиша зажата. Панели по умолчанию встают поверх центра арены,
+        // где стартует червь, и без скрытия его не видно на скриншотах/записи.
+        if (ImGui::IsKeyPressed(ImGuiKey_F10, false)) m_showDebugUI = !m_showDebugUI;
+        if (!m_showDebugUI) return;
+
         if (m_monoFont) ImGui::PushFont(m_monoFont);
 
         WormSim::Snapshot snap;
@@ -936,7 +948,7 @@ private:
     WormSim::Snapshot m_prevRenderSnap;
     WormSim::Snapshot m_currRenderSnap;
     bool m_haveRenderSnap = false;
-    bool m_themeApplied = false; // applyNocturneImGuiTheme() one-time-apply guard, see onImGui
+    bool m_showDebugUI = true;   // F10 прячет все панели, см. onImGui()
 #ifdef TESSERA_IMGUI_ENABLED
     ImFont* m_monoFont = nullptr; // loaded by applyNocturneImGuiTheme(), pushed around onImGui()'s content
 #endif
