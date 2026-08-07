@@ -150,34 +150,40 @@ void Network::step(float dt) {
                 // это означает "нет память вообще" -> подставляем f напрямую, а не
                 // копим его по dt (иначе безынерционный считыватель начал бы дрейфовать).
                 //
-                // leak=0 for Output - TRIED CHANGING, REVERTED. tests/worm_network_
-                // eigenmodes found the network's slowest linear mode (~755s) is 100%
-                // Output/muscle energy, exactly because leak=0 leaves muscles with
-                // only weak gap-junction diffusion as a restoring force - correct,
-                // confirmed diagnosis. Giving Output an ordinary nonzero leak (like
-                // every other type) DID collapse that eigenvalue as predicted, and DID
-                // measurably raise the real (nonlinear) network's oscillation
-                // frequency (~0.03-0.05Hz -> ~0.15-0.18Hz, confirmed via the "trace"
-                // mode). But real crawling speed (centroid path length/time, no food,
-                // the same body-lengths/s metric as tests/worm_speed_calibration) got
-                // ~28x WORSE (0.0108 -> 0.00039 BL/s, confirmed across 15 independent
-                // seed bases, not a fluke), not better - a faster neural oscillation
-                // doesn't help if the body can't turn it into a coherent propulsive
-                // wave. A follow-up attempt to compensate by also speeding up
-                // WormBody's own angle-decay time constant (body.cpp, was going to
-                // let the body "keep up" with the faster network) made it MUCH worse
-                // still (speed collapsed further, efficiency 0.52 -> 0.06) - the
-                // body's decay-to-neutral term isn't just a low-pass filter to widen,
-                // it's also how long a commanded bend PERSISTS to do propulsive work;
-                // shortening that persistence starves solve_propulsion of anything to
-                // push against. Reverted both changes. Net conclusion: this network's
-                // slow eigenvalue-timescale is real and now well-understood (muscle
-                // leak=0), but is NOT simply "a bug to fix" - the current slow network
-                // + body pairing is, empirically, a working (if unrealistically slow)
-                // balance, and naive attempts to speed up either side independently
-                // broke the coupling between them rather than improving it. A real fix
-                // would need to understand and preserve that coupling while speeding
-                // both sides up together, not tested here.
+                // leak=0 для Output - ПРОБОВАЛ МЕНЯТЬ, ОТКАТИЛ.
+                // tests/worm_network_eigenmodes нашёл, что самая медленная
+                // линейная мода сети (~755с) на 100% состоит из энергии
+                // Output/мышц - ровно потому, что при leak=0 у мышц в качестве
+                // возвращающей силы остаётся только слабая диффузия через gap
+                // junction. Диагноз верный и подтверждённый. Выдача Output
+                // обычной ненулевой утечки (как у всех остальных типов)
+                // действительно схлопнула это собственное значение, как и
+                // предсказывалось, и действительно заметно подняла частоту
+                // колебаний реальной (нелинейной) сети (~0.03-0.05 Гц ->
+                // ~0.15-0.18 Гц, подтверждено режимом "trace"). Но реальная
+                // скорость ползания (длина пути центроида / время, без еды, та
+                // же метрика body-lengths/s, что и в
+                // tests/worm_speed_calibration) стала ~28x ХУЖЕ (0.0108 ->
+                // 0.00039 BL/s, подтверждено на 15 независимых базах сидов, не
+                // случайность), а не лучше: более быстрая нейронная осцилляция
+                // не помогает, если тело не умеет превратить её в когерентную
+                // движущую волну. Последующая попытка скомпенсировать это,
+                // ускорив заодно постоянную времени затухания угла у WormBody
+                // (body.cpp - расчёт был дать телу "поспевать" за ускоренной
+                // сетью), сделала ЕЩЁ намного хуже (скорость просела дальше,
+                // efficiency 0.52 -> 0.06): член затухания тела к нейтрали - не
+                // просто фильтр нижних частот, который можно расширить, это ещё
+                // и то, КАК ДОЛГО скомандованный изгиб СОХРАНЯЕТСЯ, чтобы
+                // совершать движущую работу; укорачивая это время, мы оставляем
+                // solve_propulsion без опоры. Обе правки откачены. Общий вывод:
+                // медленный масштаб собственных значений этой сети реален и
+                // теперь хорошо понят (leak=0 у мышц), но это НЕ просто "баг,
+                // который надо починить": текущая связка медленная сеть + тело
+                // эмпирически представляет собой рабочий (пусть и нереалистично
+                // медленный) баланс, и наивные попытки ускорить любую из сторон
+                // по отдельности ломали связь между ними, а не улучшали её.
+                // Настоящий фикс должен понять и сохранить эту связь, ускоряя
+                // обе стороны вместе - здесь такое не проверялось.
                 const NeuronParams& p = params_[i];
                 const bool is_output = types_[i] == NeuronType::Output;
                 // Мышцы (Output) больше не архитектурно заперты на leak=0 -

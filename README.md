@@ -43,4 +43,6 @@ clone, no extra setup beyond Tessera's own toolchain (Windows + MSVC).
 - [WORM.md](demo/worm/WORM.md) — full reference: network model, body physics,
   every `WormSim::Params` field
 - [NEURONS.md](demo/worm/NEURONS.md) — neuron naming/nomenclature
-- `demo/worm/WORM_V*_RESULTS.md` — calibration history
+- [docs/journal/](docs/journal/) — calibration history, one report per phase
+  (V2 through V5). Half of them are negative results: things that were tried,
+  measured, and reverted, with the numbers that killed them.

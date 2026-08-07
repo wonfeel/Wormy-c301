@@ -40,3 +40,7 @@ Desktop.ini
 #docs/
 
 build_err.txt
+
+# Выходной артефакт Test_worm_network_eigenmodes (пишется в cwd при запуске),
+# а не входные данные - в git попал по недосмотру.
+network_export.txt
