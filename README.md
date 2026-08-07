@@ -2,6 +2,7 @@
 
 ![C++](https://img.shields.io/badge/C%2B%2B-17-blue?style=flat)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d7?style=flat)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat)
 
 A C. elegans body + nervous system simulation. The real 401-neuron connectome
 ([Cook et al. 2019](https://doi.org/10.1038/s41586-019-1352-7)) drives a
@@ -33,9 +34,9 @@ cmake -S . -B out/build -G Ninja
 cmake --build out/build --target Demo_worm
 ```
 
-Pulls the [Tessera](https://github.com/wonfeel/Tessera) engine automatically
-via CMake `FetchContent` — nothing to clone by hand. Windows + MSVC, same
-requirements as Tessera itself.
+The `FetchContent` call in `CMakeLists.txt` grabs
+[Tessera](https://github.com/wonfeel/Tessera) at configure time — no manual
+clone, no extra setup beyond Tessera's own toolchain (Windows + MSVC).
 
 ## Docs
 

@@ -1,0 +1,38 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # No CMakePresets here (unlike Tessera) - this repo pulls the engine via
+      # FetchContent instead of being built in-place, so a plain out-of-source
+      # configure is simpler than maintaining a duplicate presets file.
+      - name: Configure (CPU-only, no CUDA; pulls Tessera via FetchContent)
+        run: cmake -S . -B out/build -G Ninja
+        working-directory: ${{ github.workspace }}
+
+      - name: Build
+        run: cmake --build out/build --target Test_worm_locomotion Test_worm_regression
+        working-directory: ${{ github.workspace }}
+
+      # Both are headless (pure connectome/body math, no GLFW window) -
+      # safe to run directly on a GPU-less/display-less runner.
+      - name: Run Test_worm_locomotion
+        run: out/build/Test_worm_locomotion.exe
+        working-directory: ${{ github.workspace }}
+
+      - name: Run Test_worm_regression
+        run: out/build/Test_worm_regression.exe
+        working-directory: ${{ github.workspace }}
